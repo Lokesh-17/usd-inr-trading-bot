@@ -82,7 +82,7 @@ st.markdown("Ask me anything about USD to INR exchange rates or forex trends.")
 st.markdown("---")
 try:
     live_rate = get_usd_inr_rate()
-    st.metric(label="Current USD to INR Rate", value=f"₹{live_rate:.2f} INR") # Updated label
+    st.metric(label="Current USD to INR Rate", value=f"₹{live_rate:.2f} INR")
     st.markdown(
         """
         <div style='text-align: center; color: gray; font-size: small;'>
@@ -103,29 +103,32 @@ for message in st.session_state.chat_history:
     else:
         st.markdown(f"**🤖 Response:** {message['content']}")
 
-# User input for chat
-user_input = st.text_input("🧠 Ask a question (or type 'exit'):", key="chat_input")
+# --- Input Form for Chat ---
+# Use a form to manage input submission and prevent cyclic reruns
+with st.form(key='chat_form', clear_on_submit=True):
+    user_input = st.text_input("🧠 Ask a question:", key="user_question_input")
+    submit_button = st.form_submit_button(label='Send')
 
-if user_input:
-    if user_input.lower() == 'exit':
-        st.session_state.chat_history.append({"role": "user", "content": user_input})
-        st.session_state.chat_history.append({"role": "bot", "content": "Goodbye! The bot session has ended."})
-    else:
-        st.session_state.chat_history.append({"role": "user", "content": user_input})
-        with st.spinner("🤖 Thinking..."):
-            llm_response = ""
-            # Check if the user's question explicitly asks for the rate
-            if "usd" in user_input.lower() and "inr" in user_input.lower() and ("price" in user_input.lower() or "rate" in user_input.lower()):
-                try:
-                    rate = get_usd_inr_rate()
-                    llm_response = f"The current USD to INR exchange rate is ₹{rate:.2f}."
-                except Exception:
-                    llm_response = "I couldn't fetch the live rate at the moment, but I can still discuss forex trends."
-            else:
-                # Use the conversational chain for other questions
-                llm_response = st.session_state.conversation.predict(input=user_input)
+    if submit_button and user_input: # Process only when button is clicked and input is not empty
+        if user_input.lower() == 'exit':
+            st.session_state.chat_history.append({"role": "user", "content": user_input})
+            st.session_state.chat_history.append({"role": "bot", "content": "Goodbye! The bot session has ended."})
+            # No explicit rerun needed, form submission triggers rerun
+        else:
+            st.session_state.chat_history.append({"role": "user", "content": user_input})
+            with st.spinner("🤖 Thinking..."):
+                llm_response = ""
+                # Check if the user's question explicitly asks for the rate
+                if "usd" in user_input.lower() and "inr" in user_input.lower() and ("price" in user_input.lower() or "rate" in user_input.lower()):
+                    try:
+                        rate = get_usd_inr_rate()
+                        llm_response = f"The current USD to INR exchange rate is ₹{rate:.2f}."
+                    except Exception:
+                        llm_response = "I couldn't fetch the live rate at the moment, but I can still discuss forex trends."
+                else:
+                    # Use the conversational chain for other questions
+                    llm_response = st.session_state.conversation.predict(input=user_input)
 
-            st.session_state.chat_history.append({"role": "bot", "content": llm_response})
-    # This will trigger a rerun naturally to update the chat history display
-    st.rerun() # Use st.rerun() for a more explicit and reliable rerun in newer Streamlit versions
+                st.session_state.chat_history.append({"role": "bot", "content": llm_response})
+            # No explicit rerun needed, form submission handles it by clearing input and updating session state
 
