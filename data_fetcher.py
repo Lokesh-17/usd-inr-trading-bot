@@ -1,110 +1,77 @@
 # data_fetcher.py
 
-import requests
+import yfinance as yf
+from pycoingecko import CoinGeckoAPI
 import pandas as pd
 import datetime
 
-# Constants for Binance API
-BINANCE_API_BASE = "https://api.binance.com/api/v3"
-SYMBOL = "USDTINR" # USDT to Indian Rupee
-
-# Define intervals for klines (matching common use cases)
-# These are the strings Binance API expects
-KLINE_INTERVAL_1MINUTE = "1m"
-KLINE_INTERVAL_5MINUTE = "5m"
-KLINE_INTERVAL_15MINUTE = "15m"
-KLINE_INTERVAL_30MINUTE = "30m"
-KLINE_INTERVAL_1HOUR = "1h"
-KLINE_INTERVAL_4HOUR = "4h"
-KLINE_INTERVAL_1DAY = "1d"
-
+# Initialize CoinGecko API client
+cg = CoinGeckoAPI()
 
 def get_usd_inr_rate():
     """
-    Fetches the current USDT/INR exchange rate from Binance Spot API using requests.
-    USDT (Tether) is a stablecoin pegged to the US Dollar, serving as a proxy for USD.
+    Fetches the current USD to INR exchange rate using yfinance.
+    Note: yfinance primarily provides market data, and direct forex pairs
+    might be less real-time or accurate compared to dedicated forex APIs.
+    However, it's suitable for general trends.
     """
-    endpoint = f"{BINANCE_API_BASE}/ticker/price"
-    params = {"symbol": SYMBOL}
-
     try:
-        response = requests.get(endpoint, params=params)
-        response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
-        data = response.json()
+        # USDINR=X is the Yahoo Finance symbol for USD/INR
+        ticker = yf.Ticker("USDINR=X")
+        # Get the most recent data point
+        data = ticker.history(period="1d")
 
-        if "price" in data:
-            return float(data["price"])
+        if not data.empty:
+            # The 'Close' price for the most recent day
+            return data['Close'].iloc[-1]
         else:
-            raise ValueError(f"Price data not found for {SYMBOL} in Binance API response: {data}")
+            raise ValueError("No data found for USDINR=X. Check the ticker symbol or market availability.")
 
-    except requests.exceptions.RequestException as e:
-        raise ConnectionError(f"Could not connect to Binance API for current price: {e}")
-    except ValueError as e:
-        raise ValueError(f"Error parsing Binance API response for current price: {e}")
     except Exception as e:
-        raise Exception(f"An unexpected error occurred while fetching current price: {e}")
+        raise Exception(f"Failed to fetch USD/INR rate from yfinance: {e}")
 
-
-def get_candlestick_data(symbol=SYMBOL, interval=KLINE_INTERVAL_1HOUR, limit=500):
+def get_coingecko_candlestick_data(coin_id='bitcoin', vs_currency='inr', days='30'):
     """
-    Fetches historical candlestick data (OHLCV) for a given symbol and interval from Binance using requests.
+    Fetches historical candlestick data (OHLCV) for a given cryptocurrency from CoinGecko.
     Args:
-        symbol (str): Trading pair symbol (e.g., "USDTINR").
-        interval (str): Kline interval (e.g., "1m", "1h", "1d").
-        limit (int): Number of most recent candles to fetch.
+        coin_id (str): The CoinGecko ID of the coin (e.g., 'bitcoin', 'ethereum').
+        vs_currency (str): The target currency (e.g., 'usd', 'inr').
+        days (str): Number of days of data to fetch (e.g., '1', '7', '30', 'max').
     Returns:
-        pd.DataFrame: DataFrame with 'Open', 'High', 'Low', 'Close', 'Volume', 'Datetime' columns.
+        pd.DataFrame: DataFrame with 'Open', 'High', 'Low', 'Close', 'Datetime' columns.
     """
-    endpoint = f"{BINANCE_API_BASE}/klines"
-    params = {
-        "symbol": symbol,
-        "interval": interval,
-        "limit": limit
-    }
-
     try:
-        response = requests.get(endpoint, params=params)
-        response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
-        klines = response.json()
+        # CoinGecko API for market chart data (includes OHLC)
+        # The 'ohlc' endpoint provides OHLC data directly
+        ohlc_data = cg.get_coin_ohlc_by_id(id=coin_id, vs_currency=vs_currency, days=days)
 
-        if not klines:
-            raise ValueError(f"No kline data found for {symbol} with interval {interval}.")
+        if not ohlc_data:
+            raise ValueError(f"No OHLC data found for {coin_id}/{vs_currency} from CoinGecko for {days} days.")
 
-        # Process klines data into a pandas DataFrame
-        df = pd.DataFrame(klines, columns=[
-            'open_time', 'open', 'high', 'low', 'close', 'volume',
-            'close_time', 'quote_asset_volume', 'number_of_trades',
-            'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
-        ])
+        # Convert to DataFrame
+        df = pd.DataFrame(ohlc_data, columns=['timestamp', 'open', 'high', 'low', 'close'])
 
         # Convert timestamp to datetime and set as index
-        df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
-        df = df.rename(columns={'open_time': 'Datetime'})
+        df['Datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
         df = df.set_index('Datetime')
 
-        # Convert OHLCV columns to numeric
-        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+        # Convert OHLC columns to numeric
+        numeric_cols = ['open', 'high', 'low', 'close']
         for col in numeric_cols:
             df[col] = pd.to_numeric(df[col])
 
-        # Select relevant columns for the chart
-        return df[['open', 'high', 'low', 'close', 'volume']]
-    except requests.exceptions.RequestException as e:
-        raise ConnectionError(f"Could not connect to Binance API for klines: {e}")
-    except ValueError as e:
-        raise ValueError(f"Error parsing Binance API response for klines: {e}")
+        return df[['open', 'high', 'low', 'close']] # Volume is not directly available from this endpoint
     except Exception as e:
-        raise Exception(f"An unexpected error occurred while fetching klines: {e}")
+        raise Exception(f"Failed to fetch historical data from CoinGecko: {e}")
 
 # Example of how to test this function (optional, for local debugging)
 if __name__ == "__main__":
     try:
         current_rate = get_usd_inr_rate()
-        print(f"Current USDT/INR rate: ₹{current_rate:.2f}")
+        print(f"Current USD/INR rate (YFinance): ₹{current_rate:.2f}")
 
-        candlesticks = get_candlestick_data(interval=KLINE_INTERVAL_1MINUTE, limit=5)
-        print("\nLast 5 Minute Candlesticks:")
-        print(candlesticks)
+        candlesticks = get_coingecko_candlestick_data(coin_id='bitcoin', vs_currency='inr', days='7')
+        print("\nLast 7 Days BTC/INR Candlesticks (CoinGecko):")
+        print(candlesticks.head())
     except Exception as e:
         print(f"Error: {e}")
-
