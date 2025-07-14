@@ -85,7 +85,6 @@ pydantic-settings==2.10.1
 pydantic_core==2.33.2
 pydeck==0.9.1
 pyparsing==3.2.3
-python-binance==1.0.29
 python-dateutil==2.9.0.post0
 python-dotenv==1.1.1
 pytz==2025.2

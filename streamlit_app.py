@@ -4,10 +4,8 @@ import streamlit as st
 import os
 import pandas as pd
 import plotly.graph_objects as go # For candlestick chart
-from binance.client import Client # For kline interval constants
-
-# Ensure data_fetcher.py is in the same directory and contains get_usd_inr_rate()
-from data_fetcher import get_usd_inr_rate, get_candlestick_data
+# Import constants directly from data_fetcher
+from data_fetcher import get_usd_inr_rate, get_candlestick_data, KLINE_INTERVAL_1MINUTE, KLINE_INTERVAL_5MINUTE, KLINE_INTERVAL_15MINUTE, KLINE_INTERVAL_30MINUTE, KLINE_INTERVAL_1HOUR, KLINE_INTERVAL_4HOUR, KLINE_INTERVAL_1DAY
 
 # Import LangChain components for HuggingFaceHub
 from langchain_community.llms import HuggingFaceHub
@@ -107,13 +105,13 @@ st.header("📊 Live USDT/INR Candlestick Chart")
 
 # Selectbox for interval
 interval_options = {
-    "1 Minute": Client.KLINE_INTERVAL_1MINUTE,
-    "5 Minutes": Client.KLINE_INTERVAL_5MINUTE,
-    "15 Minutes": Client.KLINE_INTERVAL_15MINUTE,
-    "30 Minutes": Client.KLINE_INTERVAL_30MINUTE,
-    "1 Hour": Client.KLINE_INTERVAL_1HOUR,
-    "4 Hours": Client.KLINE_INTERVAL_4HOUR,
-    "1 Day": Client.KLINE_INTERVAL_1DAY
+    "1 Minute": KLINE_INTERVAL_1MINUTE,
+    "5 Minutes": KLINE_INTERVAL_5MINUTE,
+    "15 Minutes": KLINE_INTERVAL_15MINUTE,
+    "30 Minutes": KLINE_INTERVAL_30MINUTE,
+    "1 Hour": KLINE_INTERVAL_1HOUR,
+    "4 Hours": KLINE_INTERVAL_4HOUR,
+    "1 Day": KLINE_INTERVAL_1DAY
 }
 selected_interval_label = st.selectbox(
     "Select Candlestick Interval:",
@@ -179,7 +177,6 @@ with st.form(key='chat_form', clear_on_submit=True):
             st.session_state.chat_history.append({"role": "user", "content": user_input})
             with st.spinner("🤖 Thinking..."):
                 llm_response = ""
-                # Check if the user's question explicitly asks for the rate
                 # Note: The bot will still refer to USD/INR, but the chart is USDT/INR
                 if "usd" in user_input.lower() and "inr" in user_input.lower() and ("price" in user_input.lower() or "rate" in user_input.lower()):
                     try:
