@@ -120,6 +120,10 @@ selected_period_label = st.selectbox(
     list(time_period_options.keys()),
     index=3 # Default to 30 Days
 )
+# --- DEBUGGING LINE ---
+st.write(f"DEBUG: Selected chart period: {selected_period_label}")
+# --- END DEBUGGING LINE ---
+
 selected_period_days = time_period_options[selected_period_label]
 
 # Cache the data for a reasonable period (e.g., 1 hour for historical data)
