@@ -24,9 +24,8 @@ from langchain.prompts import PromptTemplate
 # Attempt to retrieve the token from environment variables
 hf_token_value = os.getenv("HF_TOKEN")
 
-# --- Debugging print statement ---
-# This will print to your terminal where you run 'streamlit run'
-print(f"DEBUG: HF_TOKEN value from environment: {hf_token_value}")
+# --- Debugging print statements for HF_TOKEN ---
+print(f"DEBUG: Initial HF_TOKEN value from environment: {hf_token_value}")
 
 if not hf_token_value:
     st.error("Error: Hugging Face API token (HF_TOKEN) not found. Please set it as an environment variable.")
@@ -35,17 +34,25 @@ if not hf_token_value:
 
 # Assign the retrieved value to HF_TOKEN for use in HuggingFaceHub
 HF_TOKEN = hf_token_value
+print(f"DEBUG: HF_TOKEN assigned for LLM: {HF_TOKEN[:5]}...{HF_TOKEN[-5:]}") # Print partial token for security
 
 # Initialize HuggingFaceHub LLM
+llm = None # Initialize llm to None
 try:
     llm = HuggingFaceHub(
         repo_id="HuggingFaceTB/SmolLM3-3B", # Using the previous Hugging Face model
         huggingfacehub_api_token=HF_TOKEN,
         model_kwargs={"temperature": 0.7, "max_new_tokens": 256}
     )
+    print("DEBUG: HuggingFaceHub LLM initialized successfully.")
 except Exception as e:
     st.error(f"Error initializing HuggingFaceHub LLM: {e}")
     st.info("Please check your HF_TOKEN and ensure the model 'HuggingFaceTB/SmolLM3-3B' is accessible.")
+    st.stop()
+
+# Ensure LLM is not None before proceeding
+if llm is None:
+    st.error("LLM object is None after initialization attempt. Cannot proceed.")
     st.stop()
 
 
@@ -185,9 +192,9 @@ def get_and_plot_yfinance_candlesticks_with_signals(symbol, period, short_sma, l
             # Generate Signals
             # Initialize 'Signal' column: 0 for no signal, 1 for buy, -1 for sell
             candlestick_df['Signal'] = 0
-            # Condition for Buy: Short SMA crosses above Long SMA
+            # When short SMA crosses above long SMA (Buy signal)
             candlestick_df.loc[candlestick_df['SMA_Short'] > candlestick_df['SMA_Long'], 'Signal'] = 1
-            # Condition for Sell: Short SMA crosses below Long SMA
+            # When short SMA crosses below long SMA (Sell signal)
             candlestick_df.loc[candlestick_df['SMA_Short'] < candlestick_df['SMA_Long'], 'Signal'] = -1
 
             # Identify actual crossover points for plotting and trading
@@ -315,7 +322,12 @@ def get_and_plot_yfinance_candlesticks_with_signals(symbol, period, short_sma, l
             st.subheader("📈 Simulation Results for Selected Period")
             st.write(f"**Final INR Balance:** ₹{st.session_state.inr_balance_sim:,.2f}")
             st.write(f"**Final USD Held:** ${st.session_state.usd_held_sim:,.2f}")
-            st.write(f"**Total Simulated Portfolio Value (at end of period):** ₹{st.session_state.inr_balance_sim + (st.session_state.usd_held_sim * candlestick_df['Close'].iloc[-1]):,.2f}")
+            # Ensure candlestick_df is not empty before accessing iloc[-1]
+            if not candlestick_df.empty:
+                st.write(f"**Total Simulated Portfolio Value (at end of period):** ₹{st.session_state.inr_balance_sim + (st.session_state.usd_held_sim * candlestick_df['Close'].iloc[-1]):,.2f}")
+            else:
+                st.write("**Total Simulated Portfolio Value (at end of period):** N/A (No chart data)")
+
 
             if st.session_state.trade_history_sim:
                 st.subheader("Trade History (Simulation)")
