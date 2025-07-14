@@ -1,0 +1,3 @@
+tradingbot-env/
+*.pyc
+__pycache__/
