@@ -5,42 +5,45 @@ import os # For environment variables
 # Ensure data_fetcher.py is in the same directory and contains get_usd_inr_rate()
 from data_fetcher import get_usd_inr_rate
 
-# Import LangChain components for Google Gemini
-# You will need to install: pip install langchain-google-genai
-from langchain_google_genai import ChatGoogleGenerativeAI
+# Import LangChain components for HuggingFaceHub
+# You will need to install: pip install huggingface-hub langchain
+from langchain_community.llms import HuggingFaceHub # Reverting to HuggingFaceHub
 from langchain.chains import ConversationChain
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
 
 # --- Configuration and LLM Setup ---
-# Set your Google API key from environment variable for security
+# Set your Hugging Face API key from environment variable for security
 # It's highly recommended to set this as an environment variable (e.g., in your .bashrc, .zshrc, or system settings)
 # Example of how to set it in your terminal (for current session only):
-# export GOOGLE_API_KEY="YOUR_ACTUAL_GOOGLE_API_KEY_HERE"
+# export HF_TOKEN="hf_YOUR_ACTUAL_TOKEN_HERE"
 
 # Attempt to retrieve the token from environment variables
-google_api_key_value = os.getenv("GOOGLE_API_KEY")
+hf_token_value = os.getenv("HF_TOKEN")
 
 # --- Debugging print statement ---
 # This will print to your terminal where you run 'streamlit run'
-print(f"DEBUG: GOOGLE_API_KEY value from environment: {google_api_key_value}")
+print(f"DEBUG: HF_TOKEN value from environment: {hf_token_value}")
 
-if not google_api_key_value:
-    st.error("Error: Google API Key (GOOGLE_API_KEY) not found. Please set it as an environment variable.")
-    st.info("Example: In your terminal, run `export GOOGLE_API_KEY=\"YOUR_ACTUAL_GOOGLE_API_KEY_HERE\"`")
-    st.stop() # Stop the app if key is missing
+if not hf_token_value:
+    st.error("Error: Hugging Face API token (HF_TOKEN) not found. Please set it as an environment variable.")
+    st.info("Example: In your terminal, run `export HF_TOKEN=\"YOUR_ACTUAL_HF_TOKEN_HERE\"`")
+    st.stop() # Stop the app if token is missing
 
-# Initialize Gemini LLM
+# Assign the retrieved value to HF_TOKEN for use in HuggingFaceHub
+HF_TOKEN = hf_token_value
+
+# Initialize HuggingFaceHub LLM
+# Ensure the model name is correct and accessible via your HF_TOKEN
 try:
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-pro", # Or "gemini-1.5-pro-latest" if you have access and prefer
-        google_api_key=google_api_key_value,
-        temperature=0.7,
-        convert_system_message_to_human=True # Recommended for better prompt handling
+    llm = HuggingFaceHub(
+        repo_id="HuggingFaceTB/SmolLM3-3B", # Using the previous Hugging Face model
+        huggingfacehub_api_token=HF_TOKEN,
+        model_kwargs={"temperature": 0.7, "max_new_tokens": 256}
     )
 except Exception as e:
-    st.error(f"Error initializing Google Gemini LLM: {e}")
-    st.info("Please check your GOOGLE_API_KEY and ensure access to the 'gemini-pro' model.")
+    st.error(f"Error initializing HuggingFaceHub LLM: {e}")
+    st.info("Please check your HF_TOKEN and ensure the model 'HuggingFaceTB/SmolLM3-3B' is accessible.")
     st.stop()
 
 
@@ -82,7 +85,7 @@ st.markdown("Ask me anything about USD to INR exchange rates or forex trends.")
 st.markdown("---")
 try:
     live_rate = get_usd_inr_rate()
-    st.metric(label="Current USD to INR Rate", value=f"₹{live_rate:.2f} INR") # Updated label
+    st.metric(label="Current USD to INR Rate", value=f"₹{live_rate:.2f} INR")
     st.markdown(
         """
         <div style='text-align: center; color: gray; font-size: small;'>
@@ -113,7 +116,6 @@ with st.form(key='chat_form', clear_on_submit=True):
         if user_input.lower() == 'exit':
             st.session_state.chat_history.append({"role": "user", "content": user_input})
             st.session_state.chat_history.append({"role": "bot", "content": "Goodbye! The bot session has ended."})
-            # No explicit rerun needed, form submission triggers rerun
         else:
             st.session_state.chat_history.append({"role": "user", "content": user_input})
             with st.spinner("🤖 Thinking..."):
@@ -130,4 +132,3 @@ with st.form(key='chat_form', clear_on_submit=True):
                     llm_response = st.session_state.conversation.predict(input=user_input)
 
                 st.session_state.chat_history.append({"role": "bot", "content": llm_response})
-            # No explicit rerun needed, form submission handles it by clearing input and updating session state

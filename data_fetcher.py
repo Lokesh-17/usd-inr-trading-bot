@@ -1,48 +1,34 @@
 # data_fetcher.py
 
-import requests
-import os
+import yfinance as yf
 
 def get_usd_inr_rate():
     """
-    Fetches the current USD to INR exchange rate from ExchangeRate-API.
-    Requires an API key set as an environment variable named EXCHANGE_RATE_API_KEY.
+    Fetches the current USD to INR exchange rate using yfinance.
+    Note: yfinance primarily provides market data, and direct forex pairs
+    might be less real-time or accurate compared to dedicated forex APIs.
+    However, it's suitable for general trends.
     """
-    api_key = os.getenv("EXCHANGE_RATE_API_KEY")
-    if not api_key:
-        raise ValueError("EXCHANGE_RATE_API_KEY environment variable not set.")
-
-    base_currency = "USD"
-    target_currency = "INR"
-    api_url = f"https://v6.exchangerate-api.com/v6/{api_key}/pair/{base_currency}/{target_currency}"
-
     try:
-        response = requests.get(api_url)
-        response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
-        data = response.json()
+        # USDINR=X is the Yahoo Finance symbol for USD/INR
+        ticker = yf.Ticker("USDINR=X")
+        # Get the most recent data point
+        data = ticker.history(period="1d")
 
-        if data.get("result") == "success" and "conversion_rate" in data:
-            return float(data["conversion_rate"])
-        elif data.get("result") == "error":
-            error_type = data.get("error-type", "unknown_error")
-            raise ValueError(f"ExchangeRate-API error: {error_type}. Response: {data}")
+        if not data.empty:
+            # The 'Close' price for the most recent day
+            return data['Close'].iloc[-1]
         else:
-            raise ValueError(f"Unexpected response from ExchangeRate-API: {data}")
+            raise ValueError("No data found for USDINR=X. Check the ticker symbol or market availability.")
 
-    except requests.exceptions.RequestException as e:
-        raise ConnectionError(f"Could not connect to ExchangeRate-API: {e}")
-    except ValueError as e:
-        raise ValueError(f"Error parsing ExchangeRate-API response: {e}")
     except Exception as e:
-        raise Exception(f"An unexpected error occurred while fetching data: {e}")
+        raise Exception(f"Failed to fetch USD/INR rate from yfinance: {e}")
 
 # Example of how to test this function (optional, for local debugging)
 if __name__ == "__main__":
-    # For local testing, set the environment variable temporarily:
-    # export EXCHANGE_RATE_API_KEY="YOUR_ACTUAL_EXCHANGE_RATE_API_KEY"
     try:
         rate = get_usd_inr_rate()
-        print(f"Current USD/INR rate from ExchangeRate-API: ₹{rate:.2f}")
-    except (ConnectionError, ValueError, Exception) as e:
+        print(f"Current USD/INR rate from YFinance: ₹{rate:.2f}")
+    except Exception as e:
         print(f"Failed to fetch rate: {e}")
 
