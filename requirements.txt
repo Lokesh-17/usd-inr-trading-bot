@@ -8,7 +8,7 @@ anyio==4.9.0
 attrs==25.3.0
 beautifulsoup4==4.13.4
 blinker==1.9.0
-cachetools==6.1.0
+cachetools==5.5.2
 certifi==2025.7.9
 cffi==1.17.1
 charset-normalizer==3.4.2
@@ -19,6 +19,7 @@ cycler==0.12.1
 dataclasses-json==0.6.7
 distro==1.9.0
 filelock==3.18.0
+filetype==1.2.0
 fonttools==4.58.5
 forex-python==1.9.2
 frozendict==2.4.6
@@ -26,6 +27,12 @@ frozenlist==1.7.0
 fsspec==2025.5.1
 gitdb==4.0.12
 GitPython==3.1.44
+google-ai-generativelanguage==0.6.18
+google-api-core==2.25.1
+google-auth==2.40.3
+googleapis-common-protos==1.70.0
+grpcio==1.73.1
+grpcio-status==1.73.1
 h11==0.16.0
 hf-xet==1.1.5
 httpcore==1.0.9
@@ -43,6 +50,7 @@ kiwisolver==1.4.8
 langchain==0.3.26
 langchain-community==0.3.27
 langchain-core==0.3.68
+langchain-google-genai==2.1.7
 langchain-text-splitters==0.3.8
 langsmith==0.4.5
 MarkupSafe==3.0.2
@@ -63,9 +71,12 @@ peewee==3.18.2
 pillow==11.3.0
 platformdirs==4.3.8
 propcache==0.3.2
+proto-plus==1.26.1
 protobuf==6.31.1
 psutil==7.0.0
 pyarrow==20.0.0
+pyasn1==0.6.1
+pyasn1_modules==0.4.2
 pycparser==2.22
 pydantic==2.11.7
 pydantic-settings==2.10.1
@@ -81,6 +92,7 @@ regex==2024.11.6
 requests==2.32.4
 requests-toolbelt==1.0.0
 rpds-py==0.26.0
+rsa==4.9.1
 safetensors==0.5.3
 setuptools==80.9.0
 simplejson==3.20.1
