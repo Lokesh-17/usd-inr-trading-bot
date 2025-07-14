@@ -113,10 +113,14 @@ for message in st.session_state.chat_history:
 user_input = st.text_input("🧠 Ask a question (or type 'exit'):", key="chat_input")
 
 if user_input:
+    # Clear the input box after submission
+    # This is often done by setting a default value or using a form,
+    # but for simple text_input, the app rerunning will handle it.
+    
     if user_input.lower() == 'exit':
         st.session_state.chat_history.append({"role": "user", "content": user_input})
         st.session_state.chat_history.append({"role": "bot", "content": "Goodbye! The bot session has ended."})
-        st.experimental_rerun() # Rerun to show exit message and clear input
+        # No st.experimental_rerun() here
     else:
         st.session_state.chat_history.append({"role": "user", "content": user_input})
         with st.spinner("🤖 Thinking..."):
@@ -134,5 +138,8 @@ if user_input:
                 llm_response = st.session_state.conversation.predict(input=user_input)
 
             st.session_state.chat_history.append({"role": "bot", "content": llm_response})
-            st.experimental_rerun() # Rerun to display the new message and clear input
+            # No st.experimental_rerun() here
 
+    # To clear the input box visually after submission without rerunning the whole app
+    # (This is a common pattern, but might require a form or a callback for text_input)
+    # For now, relying on natural rerun behavior.
