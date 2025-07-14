@@ -1,13 +1,16 @@
 # streamlit_app.py
 
 import streamlit as st
-import os # For environment variables
+import os
+import pandas as pd
+import plotly.graph_objects as go # For candlestick chart
+from binance.client import Client # For kline interval constants
+
 # Ensure data_fetcher.py is in the same directory and contains get_usd_inr_rate()
-from data_fetcher import get_usd_inr_rate
+from data_fetcher import get_usd_inr_rate, get_candlestick_data
 
 # Import LangChain components for HuggingFaceHub
-# You will need to install: pip install huggingface-hub langchain
-from langchain_community.llms import HuggingFaceHub # Reverting to HuggingFaceHub
+from langchain_community.llms import HuggingFaceHub
 from langchain.chains import ConversationChain
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
@@ -34,7 +37,6 @@ if not hf_token_value:
 HF_TOKEN = hf_token_value
 
 # Initialize HuggingFaceHub LLM
-# Ensure the model name is correct and accessible via your HF_TOKEN
 try:
     llm = HuggingFaceHub(
         repo_id="HuggingFaceTB/SmolLM3-3B", # Using the previous Hugging Face model
@@ -78,14 +80,14 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-st.title("💹 USD to INR Trading Bot")
-st.markdown("Ask me anything about USD to INR exchange rates or forex trends.")
+st.title("💹 USDT to INR Trading Bot (Proxy for USD)")
+st.markdown("Ask me anything about USDT to INR exchange rates or crypto/forex trends.")
 
-# Display current USD to INR rate prominently
+# Display current USDT to INR rate prominently
 st.markdown("---")
 try:
     live_rate = get_usd_inr_rate()
-    st.metric(label="Current USD to INR Rate", value=f"₹{live_rate:.2f} INR")
+    st.metric(label="Current USDT to INR Rate", value=f"₹{live_rate:.2f} INR")
     st.markdown(
         """
         <div style='text-align: center; color: gray; font-size: small;'>
@@ -99,6 +101,64 @@ except Exception as e:
     st.info("Ensure your `data_fetcher.py` is correctly set up to retrieve the rate.")
 st.markdown("---")
 
+
+# --- Live Candlestick Chart Section ---
+st.header("📊 Live USDT/INR Candlestick Chart")
+
+# Selectbox for interval
+interval_options = {
+    "1 Minute": Client.KLINE_INTERVAL_1MINUTE,
+    "5 Minutes": Client.KLINE_INTERVAL_5MINUTE,
+    "15 Minutes": Client.KLINE_INTERVAL_15MINUTE,
+    "30 Minutes": Client.KLINE_INTERVAL_30MINUTE,
+    "1 Hour": Client.KLINE_INTERVAL_1HOUR,
+    "4 Hours": Client.KLINE_INTERVAL_4HOUR,
+    "1 Day": Client.KLINE_INTERVAL_1DAY
+}
+selected_interval_label = st.selectbox(
+    "Select Candlestick Interval:",
+    list(interval_options.keys()),
+    index=0 # Default to 1 Minute
+)
+selected_interval = interval_options[selected_interval_label]
+
+# Cache the data for 1 minute to avoid hitting API too frequently
+@st.cache_data(ttl=60) # Cache for 60 seconds
+def get_and_plot_candlesticks(symbol, interval, limit):
+    """Fetches candlestick data and creates a Plotly chart."""
+    try:
+        candlestick_df = get_candlestick_data(symbol=symbol, interval=interval, limit=limit)
+
+        if not candlestick_df.empty:
+            fig = go.Figure(data=[go.Candlestick(
+                x=candlestick_df.index,
+                open=candlestick_df['open'],
+                high=candlestick_df['high'],
+                low=candlestick_df['low'],
+                close=candlestick_df['close']
+            )])
+
+            fig.update_layout(
+                title=f'{symbol} Candlestick Chart ({selected_interval_label})',
+                xaxis_title='Time',
+                yaxis_title='Price (INR)',
+                xaxis_rangeslider_visible=False # Hide the range slider for cleaner look
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No candlestick data available to display for the selected interval.")
+    except Exception as e:
+        st.error(f"Error displaying candlestick chart: {e}")
+
+# Call the function to display the chart
+get_and_plot_candlesticks("USDTINR", selected_interval, 100) # Fetch last 100 candles
+
+st.markdown("---")
+
+
+# --- Chat Section ---
+st.header("💬 Chat with the Bot")
+
 # Display chat history
 for message in st.session_state.chat_history:
     if message["role"] == "user":
@@ -107,7 +167,6 @@ for message in st.session_state.chat_history:
         st.markdown(f"**🤖 Response:** {message['content']}")
 
 # --- Input Form for Chat ---
-# Use a form to manage input submission and prevent cyclic reruns
 with st.form(key='chat_form', clear_on_submit=True):
     user_input = st.text_input("🧠 Ask a question:", key="user_question_input")
     submit_button = st.form_submit_button(label='Send')
@@ -121,10 +180,11 @@ with st.form(key='chat_form', clear_on_submit=True):
             with st.spinner("🤖 Thinking..."):
                 llm_response = ""
                 # Check if the user's question explicitly asks for the rate
+                # Note: The bot will still refer to USD/INR, but the chart is USDT/INR
                 if "usd" in user_input.lower() and "inr" in user_input.lower() and ("price" in user_input.lower() or "rate" in user_input.lower()):
                     try:
                         rate = get_usd_inr_rate()
-                        llm_response = f"The current USD to INR exchange rate is ₹{rate:.2f}."
+                        llm_response = f"The current USDT to INR exchange rate (proxy for USD) is ₹{rate:.2f}."
                     except Exception:
                         llm_response = "I couldn't fetch the live rate at the moment, but I can still discuss forex trends."
                 else:
@@ -132,3 +192,4 @@ with st.form(key='chat_form', clear_on_submit=True):
                     llm_response = st.session_state.conversation.predict(input=user_input)
 
                 st.session_state.chat_history.append({"role": "bot", "content": llm_response})
+
