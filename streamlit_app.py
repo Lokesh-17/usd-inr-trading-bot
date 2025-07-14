@@ -82,7 +82,7 @@ st.markdown("Ask me anything about USD to INR exchange rates or forex trends.")
 st.markdown("---")
 try:
     live_rate = get_usd_inr_rate()
-    st.metric(label="Current USD to INR Rate", value=f"₹{live_rate:.2f} INR")
+    st.metric(label="Current USD to INR Rate", value=f"₹{live_rate:.2f} INR") # Updated label
     st.markdown(
         """
         <div style='text-align: center; color: gray; font-size: small;'>
@@ -131,4 +131,3 @@ with st.form(key='chat_form', clear_on_submit=True):
 
                 st.session_state.chat_history.append({"role": "bot", "content": llm_response})
             # No explicit rerun needed, form submission handles it by clearing input and updating session state
-
