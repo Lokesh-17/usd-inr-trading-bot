@@ -6,7 +6,7 @@ import pandas as pd
 import plotly.graph_objects as go # For candlestick chart
 
 # Ensure data_fetcher.py is in the same directory and contains get_usd_inr_rate()
-from data_fetcher import get_usd_inr_rate, get_coingecko_candlestick_data
+from data_fetcher import get_usd_inr_rate, get_yfinance_candlestick_data # Changed import
 
 # Import LangChain components for HuggingFaceHub
 from langchain_community.llms import HuggingFaceHub
@@ -79,8 +79,8 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-st.title("💹 USD/INR Trading Bot & BTC/INR Chart")
-st.markdown("Ask me anything about USD to INR exchange rates or crypto/forex trends.")
+st.title("💹 USD/INR Trading Bot")
+st.markdown("Ask me anything about USD to INR exchange rates or forex trends.")
 
 # Display current USD to INR rate prominently
 st.markdown("---")
@@ -101,50 +101,53 @@ except Exception as e:
 st.markdown("---")
 
 
-# --- Historical Candlestick Chart Section (BTC/INR) ---
-st.header("📊 Historical BTC/INR Candlestick Chart (CoinGecko)")
+# --- Historical Candlestick Chart Section (USD/INR) ---
+st.header("📊 Historical USD/INR Candlestick Chart (YFinance)")
 
-# Selectbox for time period
+# Selectbox for time period for YFinance
+# Note: YFinance typically provides daily intervals for forex, so minute/hour options
+# might not yield data. We'll offer periods.
 time_period_options = {
-    "1 Day": "1",
-    "7 Days": "7",
-    "14 Days": "14",
-    "30 Days": "30",
-    "90 Days": "90",
-    "180 Days": "180",
-    "1 Year": "365",
+    "1 Month": "1mo",
+    "3 Months": "3mo",
+    "6 Months": "6mo",
+    "1 Year": "1y",
+    "5 Years": "5y",
     "Max": "max"
 }
 selected_period_label = st.selectbox(
-    "Select Time Period for BTC/INR Chart:",
+    "Select Time Period for USD/INR Chart:",
     list(time_period_options.keys()),
-    index=3 # Default to 30 Days
+    index=0 # Default to 1 Month
 )
-# --- DEBUGGING LINE ---
-st.write(f"DEBUG: Selected chart period: {selected_period_label}")
-# --- END DEBUGGING LINE ---
+selected_period_yf = time_period_options[selected_period_label]
 
-selected_period_days = time_period_options[selected_period_label]
+# We will stick to '1d' interval as it's the most granular for forex on YFinance
+# The user can select the *period* (how far back), but not the *interval* (candle size)
+# for intraday, as it's typically not available for USDINR=X.
+st.info("Note: YFinance typically provides daily candlestick data for USD/INR. Intraday intervals are not available.")
+
 
 # Cache the data for a reasonable period (e.g., 1 hour for historical data)
 @st.cache_data(ttl=3600) # Cache for 1 hour
-def get_and_plot_coingecko_candlesticks(coin_id, vs_currency, days):
-    """Fetches CoinGecko candlestick data and creates a Plotly chart."""
+def get_and_plot_yfinance_candlesticks(symbol, period):
+    """Fetches YFinance candlestick data and creates a Plotly chart."""
     try:
-        candlestick_df = get_coingecko_candlestick_data(coin_id=coin_id, vs_currency=vs_currency, days=days)
+        # Use '1d' interval for daily candles, as more granular is usually not available for forex
+        candlestick_df = get_yfinance_candlestick_data(symbol=symbol, period=period, interval="1d")
 
         if not candlestick_df.empty:
             fig = go.Figure(data=[go.Candlestick(
                 x=candlestick_df.index,
-                open=candlestick_df['open'],
-                high=candlestick_df['high'],
-                low=candlestick_df['low'],
-                close=candlestick_df['close']
+                open=candlestick_df['Open'],
+                high=candlestick_df['High'],
+                low=candlestick_df['Low'],
+                close=candlestick_df['Close']
             )])
 
             fig.update_layout(
-                title=f'{coin_id.capitalize()}/{vs_currency.upper()} Candlestick Chart ({selected_period_label})',
-                xaxis_title='Time',
+                title=f'{symbol} Candlestick Chart ({selected_period_label} - Daily)',
+                xaxis_title='Date',
                 yaxis_title='Price (INR)',
                 xaxis_rangeslider_visible=False # Hide the range slider for cleaner look
             )
@@ -152,10 +155,10 @@ def get_and_plot_coingecko_candlesticks(coin_id, vs_currency, days):
         else:
             st.info("No historical candlestick data available to display for the selected period.")
     except Exception as e:
-        st.error(f"Error displaying BTC/INR candlestick chart: {e}")
+        st.error(f"Error displaying USD/INR candlestick chart: {e}")
 
-# Call the function to display the chart for BTC/INR
-get_and_plot_coingecko_candlesticks(coin_id='bitcoin', vs_currency='inr', days=selected_period_days)
+# Call the function to display the chart for USD/INR
+get_and_plot_yfinance_candlesticks(symbol="USDINR=X", period=selected_period_yf)
 
 st.markdown("---")
 

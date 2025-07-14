@@ -1,19 +1,12 @@
 # data_fetcher.py
 
 import yfinance as yf
-from pycoingecko import CoinGeckoAPI
 import pandas as pd
 import datetime
-
-# Initialize CoinGecko API client
-cg = CoinGeckoAPI()
 
 def get_usd_inr_rate():
     """
     Fetches the current USD to INR exchange rate using yfinance.
-    Note: yfinance primarily provides market data, and direct forex pairs
-    might be less real-time or accurate compared to dedicated forex APIs.
-    However, it's suitable for general trends.
     """
     try:
         # USDINR=X is the Yahoo Finance symbol for USD/INR
@@ -28,41 +21,37 @@ def get_usd_inr_rate():
             raise ValueError("No data found for USDINR=X. Check the ticker symbol or market availability.")
 
     except Exception as e:
-        raise Exception(f"Failed to fetch USD/INR rate from yfinance: {e}")
+        raise Exception(f"Failed to fetch current USD/INR rate from yfinance: {e}")
 
-def get_coingecko_candlestick_data(coin_id='bitcoin', vs_currency='inr', days='30'):
+def get_yfinance_candlestick_data(symbol="USDINR=X", period="1mo", interval="1d"):
     """
-    Fetches historical candlestick data (OHLCV) for a given cryptocurrency from CoinGecko.
+    Fetches historical candlestick data (OHLC) for a given symbol from yfinance.
+    Note: For forex pairs like USDINR=X, yfinance typically provides daily intervals.
+    Intraday intervals (like 1m, 5m, 1h) are usually not available for forex on yfinance.
     Args:
-        coin_id (str): The CoinGecko ID of the coin (e.g., 'bitcoin', 'ethereum').
-        vs_currency (str): The target currency (e.g., 'usd', 'inr').
-        days (str): Number of days of data to fetch (e.g., '1', '7', '30', 'max').
+        symbol (str): Trading pair symbol (e.g., "USDINR=X").
+        period (str): Data period (e.g., "1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max").
+        interval (str): Data interval (e.g., "1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo").
+                      For USDINR=X, "1d" is usually the most granular available.
     Returns:
-        pd.DataFrame: DataFrame with 'Open', 'High', 'Low', 'Close', 'Datetime' columns.
+        pd.DataFrame: DataFrame with 'Open', 'High', 'Low', 'Close' columns and Datetime index.
     """
     try:
-        # CoinGecko API for market chart data (includes OHLC)
-        # The 'ohlc' endpoint provides OHLC data directly
-        ohlc_data = cg.get_coin_ohlc_by_id(id=coin_id, vs_currency=vs_currency, days=days)
+        ticker = yf.Ticker(symbol)
+        hist_data = ticker.history(period=period, interval=interval)
 
-        if not ohlc_data:
-            raise ValueError(f"No OHLC data found for {coin_id}/{vs_currency} from CoinGecko for {days} days.")
+        if not hist_data.empty:
+            # Reset index to make 'Date' a column for Plotly, then set it back as index
+            hist_data = hist_data.reset_index()
+            hist_data['Datetime'] = pd.to_datetime(hist_data['Date']) # Ensure Datetime is datetime
+            hist_data = hist_data.set_index('Datetime')
+            # Select only OHLC for the chart
+            return hist_data[['Open', 'High', 'Low', 'Close']]
+        else:
+            raise ValueError(f"No historical data found for {symbol} for period {period} and interval {interval}.")
 
-        # Convert to DataFrame
-        df = pd.DataFrame(ohlc_data, columns=['timestamp', 'open', 'high', 'low', 'close'])
-
-        # Convert timestamp to datetime and set as index
-        df['Datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df = df.set_index('Datetime')
-
-        # Convert OHLC columns to numeric
-        numeric_cols = ['open', 'high', 'low', 'close']
-        for col in numeric_cols:
-            df[col] = pd.to_numeric(df[col])
-
-        return df[['open', 'high', 'low', 'close']] # Volume is not directly available from this endpoint
     except Exception as e:
-        raise Exception(f"Failed to fetch historical data from CoinGecko: {e}")
+        raise Exception(f"Failed to fetch historical data from yfinance: {e}")
 
 # Example of how to test this function (optional, for local debugging)
 if __name__ == "__main__":
@@ -70,8 +59,8 @@ if __name__ == "__main__":
         current_rate = get_usd_inr_rate()
         print(f"Current USD/INR rate (YFinance): ₹{current_rate:.2f}")
 
-        candlesticks = get_coingecko_candlestick_data(coin_id='bitcoin', vs_currency='inr', days='7')
-        print("\nLast 7 Days BTC/INR Candlesticks (CoinGecko):")
+        candlesticks = get_yfinance_candlestick_data(period='7d', interval='1d')
+        print("\nLast 7 Days USD/INR Candlesticks (YFinance):")
         print(candlesticks.head())
     except Exception as e:
         print(f"Error: {e}")

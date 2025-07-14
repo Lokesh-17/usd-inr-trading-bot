@@ -78,7 +78,6 @@ psutil==7.0.0
 pyarrow==20.0.0
 pyasn1==0.6.1
 pyasn1_modules==0.4.2
-pycoingecko==3.2.0
 pycparser==2.22
 pycryptodome==3.23.0
 pydantic==2.11.7
