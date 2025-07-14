@@ -4,8 +4,9 @@ import streamlit as st
 import os
 import pandas as pd
 import plotly.graph_objects as go # For candlestick chart
-# Import constants directly from data_fetcher
-from data_fetcher import get_usd_inr_rate, get_candlestick_data, KLINE_INTERVAL_1MINUTE, KLINE_INTERVAL_5MINUTE, KLINE_INTERVAL_15MINUTE, KLINE_INTERVAL_30MINUTE, KLINE_INTERVAL_1HOUR, KLINE_INTERVAL_4HOUR, KLINE_INTERVAL_1DAY
+
+# Ensure data_fetcher.py is in the same directory and contains get_usd_inr_rate()
+from data_fetcher import get_usd_inr_rate, get_coingecko_candlestick_data
 
 # Import LangChain components for HuggingFaceHub
 from langchain_community.llms import HuggingFaceHub
@@ -78,14 +79,14 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-st.title("💹 USDT to INR Trading Bot (Proxy for USD)")
-st.markdown("Ask me anything about USDT to INR exchange rates or crypto/forex trends.")
+st.title("💹 USD/INR Trading Bot & BTC/INR Chart")
+st.markdown("Ask me anything about USD to INR exchange rates or crypto/forex trends.")
 
-# Display current USDT to INR rate prominently
+# Display current USD to INR rate prominently
 st.markdown("---")
 try:
     live_rate = get_usd_inr_rate()
-    st.metric(label="Current USDT to INR Rate", value=f"₹{live_rate:.2f} INR")
+    st.metric(label="Current USD to INR Rate", value=f"₹{live_rate:.2f} INR")
     st.markdown(
         """
         <div style='text-align: center; color: gray; font-size: small;'>
@@ -100,32 +101,33 @@ except Exception as e:
 st.markdown("---")
 
 
-# --- Live Candlestick Chart Section ---
-st.header("📊 Live USDT/INR Candlestick Chart")
+# --- Historical Candlestick Chart Section (BTC/INR) ---
+st.header("📊 Historical BTC/INR Candlestick Chart (CoinGecko)")
 
-# Selectbox for interval
-interval_options = {
-    "1 Minute": KLINE_INTERVAL_1MINUTE,
-    "5 Minutes": KLINE_INTERVAL_5MINUTE,
-    "15 Minutes": KLINE_INTERVAL_15MINUTE,
-    "30 Minutes": KLINE_INTERVAL_30MINUTE,
-    "1 Hour": KLINE_INTERVAL_1HOUR,
-    "4 Hours": KLINE_INTERVAL_4HOUR,
-    "1 Day": KLINE_INTERVAL_1DAY
+# Selectbox for time period
+time_period_options = {
+    "1 Day": "1",
+    "7 Days": "7",
+    "14 Days": "14",
+    "30 Days": "30",
+    "90 Days": "90",
+    "180 Days": "180",
+    "1 Year": "365",
+    "Max": "max"
 }
-selected_interval_label = st.selectbox(
-    "Select Candlestick Interval:",
-    list(interval_options.keys()),
-    index=0 # Default to 1 Minute
+selected_period_label = st.selectbox(
+    "Select Time Period for BTC/INR Chart:",
+    list(time_period_options.keys()),
+    index=3 # Default to 30 Days
 )
-selected_interval = interval_options[selected_interval_label]
+selected_period_days = time_period_options[selected_period_label]
 
-# Cache the data for 1 minute to avoid hitting API too frequently
-@st.cache_data(ttl=60) # Cache for 60 seconds
-def get_and_plot_candlesticks(symbol, interval, limit):
-    """Fetches candlestick data and creates a Plotly chart."""
+# Cache the data for a reasonable period (e.g., 1 hour for historical data)
+@st.cache_data(ttl=3600) # Cache for 1 hour
+def get_and_plot_coingecko_candlesticks(coin_id, vs_currency, days):
+    """Fetches CoinGecko candlestick data and creates a Plotly chart."""
     try:
-        candlestick_df = get_candlestick_data(symbol=symbol, interval=interval, limit=limit)
+        candlestick_df = get_coingecko_candlestick_data(coin_id=coin_id, vs_currency=vs_currency, days=days)
 
         if not candlestick_df.empty:
             fig = go.Figure(data=[go.Candlestick(
@@ -137,19 +139,19 @@ def get_and_plot_candlesticks(symbol, interval, limit):
             )])
 
             fig.update_layout(
-                title=f'{symbol} Candlestick Chart ({selected_interval_label})',
+                title=f'{coin_id.capitalize()}/{vs_currency.upper()} Candlestick Chart ({selected_period_label})',
                 xaxis_title='Time',
                 yaxis_title='Price (INR)',
                 xaxis_rangeslider_visible=False # Hide the range slider for cleaner look
             )
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("No candlestick data available to display for the selected interval.")
+            st.info("No historical candlestick data available to display for the selected period.")
     except Exception as e:
-        st.error(f"Error displaying candlestick chart: {e}")
+        st.error(f"Error displaying BTC/INR candlestick chart: {e}")
 
-# Call the function to display the chart
-get_and_plot_candlesticks("USDTINR", selected_interval, 100) # Fetch last 100 candles
+# Call the function to display the chart for BTC/INR
+get_and_plot_coingecko_candlesticks(coin_id='bitcoin', vs_currency='inr', days=selected_period_days)
 
 st.markdown("---")
 
@@ -177,13 +179,13 @@ with st.form(key='chat_form', clear_on_submit=True):
             st.session_state.chat_history.append({"role": "user", "content": user_input})
             with st.spinner("🤖 Thinking..."):
                 llm_response = ""
-                # Note: The bot will still refer to USD/INR, but the chart is USDT/INR
+                # Check if the user's question explicitly asks for the rate
                 if "usd" in user_input.lower() and "inr" in user_input.lower() and ("price" in user_input.lower() or "rate" in user_input.lower()):
                     try:
                         rate = get_usd_inr_rate()
-                        llm_response = f"The current USDT to INR exchange rate (proxy for USD) is ₹{rate:.2f}."
+                        llm_response = f"The current USD to INR exchange rate is ₹{rate:.2f}."
                     except Exception:
-                        llm_response = "I couldn't fetch the live rate at the moment, but I can still discuss forex trends."
+                        llm_response = "I couldn't fetch the live USD to INR rate at the moment, but I can still discuss forex trends."
                 else:
                     # Use the conversational chain for other questions
                     llm_response = st.session_state.conversation.predict(input=user_input)
