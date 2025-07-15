@@ -5,12 +5,13 @@ import os
 import pandas as pd
 import plotly.graph_objects as go
 import numpy as np
-import time # For sleep in auto-refresh
+import datetime # For timestamps
+import json # For JSON serialization/deserialization
+import uuid # For anonymous user ID
 
 # Firebase imports
-from firebase_admin import credentials, initialize_app
-from firebase_admin import firestore
-from firebase_admin import auth
+import firebase_admin
+from firebase_admin import credentials, firestore, auth
 
 # Ensure data_fetcher.py is in the same directory
 from data_fetcher import get_usd_inr_rate, get_alpha_vantage_candlestick_data
@@ -22,19 +23,25 @@ from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
 
 # --- Firebase Initialization (Only once) ---
-# Global variables provided by Canvas for Firebase
-app_id = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-firebase_config = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
-initial_auth_token = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+# Global variables provided by Canvas for Firebase (accessed via os.getenv)
+app_id = os.getenv('__app_id', 'default-app-id')
+firebase_config_str = os.getenv('__firebase_config', '{}')
+initial_auth_token = os.getenv('__initial_auth_token', None)
+
+try:
+    firebase_config = json.loads(firebase_config_str)
+except json.JSONDecodeError:
+    st.error("Error: Could not parse Firebase config. Please check the __firebase_config environment variable.")
+    firebase_config = {}
 
 if not firebase_admin._apps:
     try:
-        # Use credentials from firebase_config
         cred = credentials.Certificate(firebase_config)
-        initialize_app(cred)
+        firebase_admin.initialize_app(cred)
         st.success("Firebase initialized successfully!")
     except Exception as e:
         st.error(f"Error initializing Firebase: {e}")
+        st.info("Ensure your Firebase config is correctly set in Streamlit Cloud secrets.")
         st.stop()
 
 db = firestore.client()
@@ -42,10 +49,10 @@ db = firestore.client()
 # --- User Authentication (Anonymous for simplicity) ---
 # This ensures we have a userId for Firestore operations
 @st.cache_resource
-def get_auth_client():
+def get_auth_client_instance():
     return auth.Client(app=firebase_admin.get_app())
 
-auth_client = get_auth_client()
+auth_client = get_auth_client_instance()
 
 # Get or create user ID
 if 'user_id' not in st.session_state:
@@ -58,80 +65,99 @@ if 'user_id' not in st.session_state:
             print(f"DEBUG: Signed in with custom token. User ID: {st.session_state.user_id}")
         else:
             # Sign in anonymously if no custom token
-            anon_user = auth_client.create_user(uid=str(uuid.uuid4())) # Create a new anonymous user
-            st.session_state.user_id = anon_user.uid
-            st.session_state.is_authenticated = True
-            print(f"DEBUG: Signed in anonymously. User ID: {st.session_state.user_id}")
+            # Note: create_user requires Firebase Admin SDK setup for user management.
+            # For anonymous, we'll generate a UUID and use it as a pseudo-UID for Firestore
+            # as direct anonymous sign-in via client SDK is not what we're doing here.
+            # For full anonymous auth, you'd integrate Firebase JS SDK on frontend.
+            st.session_state.user_id = "anon_" + str(uuid.uuid4())
+            st.session_state.is_authenticated = False # Not truly Firebase authenticated
+            print(f"DEBUG: Using generated anonymous User ID: {st.session_state.user_id}")
     except Exception as e:
-        st.error(f"Error during authentication: {e}")
-        st.session_state.user_id = "anonymous_user" # Fallback
+        st.error(f"Error during authentication/user ID generation: {e}")
+        st.session_state.user_id = "fallback_user" # Fallback
         st.session_state.is_authenticated = False
         print(f"DEBUG: Authentication failed, using fallback user ID. Error: {e}")
 else:
-    print(f"DEBUG: User already authenticated. User ID: {st.session_state.user_id}")
+    print(f"DEBUG: User ID already in session state: {st.session_state.user_id}")
 
 user_id = st.session_state.user_id
-st.sidebar.write(f"Logged in as: {user_id}")
+st.sidebar.write(f"User ID: {user_id}")
 
 
 # --- Firestore Helpers ---
-@st.cache_data(ttl=60) # Cache portfolio data for 1 minute
+# Using st.cache_data for loading to reduce Firestore reads on reruns
+# but ttl is short to keep data relatively fresh.
+@st.cache_data(ttl=60)
 def load_portfolio_from_firestore(uid):
-    doc_ref = db.collection(f"artifacts/{app_id}/users/{uid}/portfolio").document("current_portfolio")
-    doc = doc_ref.get()
-    if doc.exists:
-        data = doc.to_dict()
-        print(f"DEBUG: Loaded portfolio: {data}")
-        return data.get('inr_balance', 100000.0), data.get('usd_held', 0.0)
-    print("DEBUG: No portfolio found, initializing default.")
-    return 100000.0, 0.0
+    try:
+        doc_ref = db.collection(f"artifacts/{app_id}/users/{uid}/portfolio").document("current_portfolio")
+        doc = doc_ref.get()
+        if doc.exists:
+            data = doc.to_dict()
+            print(f"DEBUG: Loaded portfolio: {data}")
+            return data.get('inr_balance', 100000.0), data.get('usd_held', 0.0)
+        print("DEBUG: No portfolio found, initializing default.")
+        return 100000.0, 0.0
+    except Exception as e:
+        st.error(f"Error loading portfolio: {e}")
+        return 100000.0, 0.0 # Return default on error
 
 def save_portfolio_to_firestore(uid, inr_balance, usd_held):
-    doc_ref = db.collection(f"artifacts/{app_id}/users/{uid}/portfolio").document("current_portfolio")
-    doc_ref.set({'inr_balance': inr_balance, 'usd_held': usd_held})
-    print(f"DEBUG: Saved portfolio: INR={inr_balance}, USD={usd_held}")
+    try:
+        doc_ref = db.collection(f"artifacts/{app_id}/users/{uid}/portfolio").document("current_portfolio")
+        doc_ref.set({'inr_balance': inr_balance, 'usd_held': usd_held})
+        print(f"DEBUG: Saved portfolio: INR={inr_balance}, USD={usd_held}")
+    except Exception as e:
+        st.error(f"Error saving portfolio: {e}")
 
-@st.cache_data(ttl=60) # Cache trade history for 1 minute
+@st.cache_data(ttl=60)
 def load_trade_history_from_firestore(uid):
-    doc_ref = db.collection(f"artifacts/{app_id}/users/{uid}/trade_history").document("history_list")
-    doc = doc_ref.get()
-    if doc.exists:
-        data = doc.to_dict()
-        # Firestore stores lists as arrays, but sometimes complex objects need JSON stringify
-        history_json = data.get('trades', '[]')
-        try:
-            return json.loads(history_json) if isinstance(history_json, str) else history_json
-        except json.JSONDecodeError:
-            print(f"WARNING: Could not decode trade history JSON: {history_json}")
-            return []
-    print("DEBUG: No trade history found, initializing empty.")
-    return []
+    try:
+        doc_ref = db.collection(f"artifacts/{app_id}/users/{uid}/trade_history").document("history_list")
+        doc = doc_ref.get()
+        if doc.exists:
+            data = doc.to_dict()
+            history_json = data.get('trades', '[]')
+            try:
+                return json.loads(history_json) if isinstance(history_json, str) else history_json
+            except json.JSONDecodeError:
+                print(f"WARNING: Could not decode trade history JSON: {history_json}")
+                return []
+        print("DEBUG: No trade history found, initializing empty.")
+        return []
+    except Exception as e:
+        st.error(f"Error loading trade history: {e}")
+        return [] # Return empty on error
 
 def save_trade_history_to_firestore(uid, trade_history):
-    doc_ref = db.collection(f"artifacts/{app_id}/users/{uid}/trade_history").document("history_list")
-    # Convert to JSON string if it contains complex objects not directly supported by Firestore
-    doc_ref.set({'trades': json.dumps(trade_history)})
-    print(f"DEBUG: Saved trade history ({len(trade_history)} entries)")
+    try:
+        doc_ref = db.collection(f"artifacts/{app_id}/users/{uid}/trade_history").document("history_list")
+        # Firestore can store lists directly, but if elements are complex, JSON stringify is safer.
+        # For simplicity, we'll stringify the whole list of dicts.
+        doc_ref.set({'trades': json.dumps(trade_history)})
+        print(f"DEBUG: Saved trade history ({len(trade_history)} entries)")
+    except Exception as e:
+        st.error(f"Error saving trade history: {e}")
 
-import json # Import json for stringify/parse
-import uuid # For anonymous user ID if auth token is not present
 
 # --- Initialize Virtual Portfolio in Session State (and load from Firestore) ---
+# Load initial state from Firestore only if not already in session_state
 if 'inr_balance' not in st.session_state:
     st.session_state.inr_balance, st.session_state.usd_held = load_portfolio_from_firestore(user_id)
-if 'usd_held' not in st.session_state: # Redundant check but harmless
-    pass
 if 'trade_history' not in st.session_state:
     st.session_state.trade_history = load_trade_history_from_firestore(user_id)
 
-def reset_portfolio():
-    """Resets the virtual portfolio to initial values and clears Firestore."""
+def reset_portfolio_callback():
+    """Callback to reset the virtual portfolio and clear Firestore."""
     st.session_state.inr_balance = 100000.0
     st.session_state.usd_held = 0.0
     st.session_state.trade_history = []
     save_portfolio_to_firestore(user_id, st.session_state.inr_balance, st.session_state.usd_held)
     save_trade_history_to_firestore(user_id, st.session_state.trade_history)
-    st.success("Portfolio reset successfully!")
+    st.success("Portfolio reset successfully! Refreshing app...")
+    # Clear cache for portfolio data so it reloads fresh
+    load_portfolio_from_firestore.clear()
+    load_trade_history_from_firestore.clear()
     st.rerun() # Rerun to reflect changes
 
 
@@ -139,7 +165,7 @@ def reset_portfolio():
 hf_token_value = os.getenv("HF_TOKEN")
 if not hf_token_value:
     st.error("Error: Hugging Face API token (HF_TOKEN) not found. Please set it as an environment variable.")
-    st.info("Example: In your terminal, run `export HF_TOKEN=\"YOUR_ACTUAL_HF_TOKEN_HERE\"`")
+    st.info("Example: In your terminal, run `export HF_TOKEN=\"YOUR_ACTUAL_TOKEN_HERE\"`")
     st.stop()
 HF_TOKEN = hf_token_value
 
@@ -191,6 +217,7 @@ st.markdown("Ask me anything about USD to INR exchange rates or forex trends.")
 
 # Display current USD to INR rate prominently
 st.markdown("---")
+live_rate = None
 try:
     live_rate = get_usd_inr_rate()
     st.metric(label="Current USD to INR Rate", value=f"₹{live_rate:.2f} INR")
@@ -210,7 +237,10 @@ st.markdown("---")
 
 # --- Virtual Portfolio Display ---
 st.header("💰 Virtual Portfolio Status (Persistent)")
-current_portfolio_value_inr = st.session_state.inr_balance + (st.session_state.usd_held * live_rate)
+if live_rate is not None:
+    current_portfolio_value_inr = st.session_state.inr_balance + (st.session_state.usd_held * live_rate)
+else:
+    current_portfolio_value_inr = st.session_state.inr_balance # Cannot calculate USD value without live rate
 
 col_bal1, col_bal2, col_bal3 = st.columns(3)
 with col_bal1:
@@ -220,7 +250,7 @@ with col_bal2:
 with col_bal3:
     st.metric(label="Total Portfolio Value (INR)", value=f"₹{current_portfolio_value_inr:,.2f}")
 
-st.button("Reset Portfolio", on_click=reset_portfolio)
+st.button("Reset Portfolio", on_click=reset_portfolio_callback)
 st.markdown("---")
 
 
@@ -242,6 +272,17 @@ selected_interval_label = st.selectbox(
     index=1 # Default to 5 Minutes
 )
 selected_interval_av = interval_options[selected_interval_label]
+
+# Sliders for SMA periods
+col_sma1, col_sma2 = st.columns(2)
+with col_sma1:
+    short_sma_period = st.slider("Short SMA Period (Candles)", min_value=5, max_value=50, value=20, step=1)
+with col_sma2:
+    long_sma_period = st.slider("Long SMA Period (Candles)", min_value=20, max_value=200, value=50, step=5)
+
+if short_sma_period >= long_sma_period:
+    st.warning("Short SMA period should be less than Long SMA period for meaningful analysis.")
+
 
 # Cache the data for 5 minutes (300 seconds) to respect Alpha Vantage free tier limits
 @st.cache_data(ttl=300)
@@ -300,7 +341,6 @@ def get_and_plot_alpha_vantage_candlesticks_with_signals(symbol, to_symbol, inte
                 line=dict(color='blue', width=1)
             ))
 
-            # Add Long SMA
             fig.add_trace(go.Scatter(
                 x=candlestick_df.index,
                 y=candlestick_df['SMA_Long'],
@@ -309,7 +349,6 @@ def get_and_plot_alpha_vantage_candlesticks_with_signals(symbol, to_symbol, inte
                 line=dict(color='orange', width=1)
             ))
 
-            # Add Buy signals (from simulation)
             fig.add_trace(go.Scatter(
                 x=buy_markers_x,
                 y=buy_markers_y,
@@ -327,7 +366,7 @@ def get_and_plot_alpha_vantage_candlesticks_with_signals(symbol, to_symbol, inte
             ))
 
             fig.update_layout(
-                title=f'{symbol}/{to_symbol} Candlestick Chart with SMAs ({selected_interval_label})',
+                title=f'{symbol}/{to_symbol} Candlestick Chart with SMAs & Signals ({selected_interval_label})',
                 xaxis_title='Time',
                 yaxis_title='Price (INR)',
                 xaxis_rangeslider_visible=False,
@@ -339,17 +378,6 @@ def get_and_plot_alpha_vantage_candlesticks_with_signals(symbol, to_symbol, inte
             st.info("No candlestick data available to display for the selected period/interval. Check API key or limits.")
     except Exception as e:
         st.error(f"Error displaying USD/INR candlestick chart: {e}")
-
-# Sliders for SMA periods
-col_sma1, col_sma2 = st.columns(2)
-with col_sma1:
-    short_sma_period = st.slider("Short SMA Period (Candles)", min_value=5, max_value=50, value=20, step=1)
-with col_sma2:
-    long_sma_period = st.slider("Long SMA Period (Candles)", min_value=20, max_value=200, value=50, step=5)
-
-if short_sma_period >= long_sma_period:
-    st.warning("Short SMA period should be less than Long SMA period for meaningful analysis.")
-
 
 # Call the function to display the chart for USD/INR with signals
 get_and_plot_alpha_vantage_candlesticks_with_signals(
@@ -375,51 +403,67 @@ with col_trade_buttons:
     st.write("") # Spacer
     st.write("") # Spacer
     if st.button("Buy USD"):
-        cost_inr = trade_amount_usd * live_rate
-        if st.session_state.inr_balance >= cost_inr:
-            st.session_state.inr_balance -= cost_inr
-            st.session_state.usd_held += trade_amount_usd
-            st.session_state.trade_history.append({
-                'Date': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'Type': 'MANUAL BUY',
-                'Amount (USD)': f"{trade_amount_usd:.2f}",
-                'Cost (INR)': f"₹{cost_inr:,.2f}",
-                'Price': f"₹{live_rate:.2f}",
-                'INR Balance': f"₹{st.session_state.inr_balance:,.2f}",
-                'USD Held': f"${st.session_state.usd_held:,.2f}"
-            })
-            save_portfolio_to_firestore(user_id, st.session_state.inr_balance, st.session_state.usd_held)
-            save_trade_history_to_firestore(user_id, st.session_state.trade_history)
-            st.success(f"Successfully bought ${trade_amount_usd:.2f} USD!")
-            st.rerun()
+        if live_rate is None:
+            st.error("Cannot execute trade: Live rate not available.")
         else:
-            st.error("Insufficient INR balance to buy USD.")
+            cost_inr = trade_amount_usd * live_rate
+            if st.session_state.inr_balance >= cost_inr:
+                st.session_state.inr_balance -= cost_inr
+                st.session_state.usd_held += trade_amount_usd
+                st.session_state.trade_history.append({
+                    'Date': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'Type': 'MANUAL BUY',
+                    'Amount (USD)': f"{trade_amount_usd:.2f}",
+                    'Cost (INR)': f"₹{cost_inr:,.2f}",
+                    'Price': f"₹{live_rate:.2f}",
+                    'INR Balance': f"₹{st.session_state.inr_balance:,.2f}",
+                    'USD Held': f"${st.session_state.usd_held:,.2f}"
+                })
+                save_portfolio_to_firestore(user_id, st.session_state.inr_balance, st.session_state.usd_held)
+                save_trade_history_to_firestore(user_id, st.session_state.trade_history)
+                st.success(f"Successfully bought ${trade_amount_usd:.2f} USD!")
+                st.rerun()
+            else:
+                st.error("Insufficient INR balance to buy USD.")
 
     if st.button("Sell USD"):
-        if st.session_state.usd_held >= trade_amount_usd:
-            revenue_inr = trade_amount_usd * live_rate
-            st.session_state.inr_balance += revenue_inr
-            st.session_state.usd_held -= trade_amount_usd
-            st.session_state.trade_history.append({
-                'Date': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'Type': 'MANUAL SELL',
-                'Amount (USD)': f"{trade_amount_usd:.2f}",
-                'Revenue (INR)': f"₹{revenue_inr:,.2f}",
-                'Price': f"₹{live_rate:.2f}",
-                'INR Balance': f"₹{st.session_state.inr_balance:,.2f}",
-                'USD Held': f"${st.session_state.usd_held:,.2f}"
-            })
-            save_portfolio_to_firestore(user_id, st.session_state.inr_balance, st.session_state.usd_held)
-            save_trade_history_to_firestore(user_id, st.session_state.trade_history)
-            st.success(f"Successfully sold ${trade_amount_usd:.2f} USD!")
-            st.rerun()
+        if live_rate is None:
+            st.error("Cannot execute trade: Live rate not available.")
         else:
-            st.error("Insufficient USD held to sell.")
+            if st.session_state.usd_held >= trade_amount_usd:
+                revenue_inr = trade_amount_usd * live_rate
+                st.session_state.inr_balance += revenue_inr
+                st.session_state.usd_held -= trade_amount_usd
+                st.session_state.trade_history.append({
+                    'Date': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'Type': 'MANUAL SELL',
+                    'Amount (USD)': f"{trade_amount_usd:.2f}",
+                    'Revenue (INR)': f"₹{revenue_inr:,.2f}",
+                    'Price': f"₹{live_rate:.2f}",
+                    'INR Balance': f"₹{st.session_state.inr_balance:,.2f}",
+                    'USD Held': f"${st.session_state.usd_held:,.2f}"
+                })
+                save_portfolio_to_firestore(user_id, st.session_state.inr_balance, st.session_state.usd_held)
+                save_trade_history_to_firestore(user_id, st.session_state.trade_history)
+                st.success(f"Successfully sold ${trade_amount_usd:.2f} USD!")
+                st.rerun()
+            else:
+                st.error("Insufficient USD held to sell.")
 
 st.subheader("Persistent Trade History")
 if st.session_state.trade_history:
-    trade_df_persistent = pd.DataFrame(st.session_state.trade_history)
-    st.dataframe(trade_df_persistent)
+    # Ensure trade_history is a list of dicts before DataFrame conversion
+    # It might be a JSON string if loaded from Firestore and not parsed correctly
+    try:
+        if isinstance(st.session_state.trade_history, str):
+            trade_data = json.loads(st.session_state.trade_history)
+        else:
+            trade_data = st.session_state.trade_history
+        trade_df_persistent = pd.DataFrame(trade_data)
+        st.dataframe(trade_df_persistent)
+    except Exception as e:
+        st.error(f"Error displaying trade history: {e}")
+        st.info("Trade history data might be corrupted or in an unexpected format.")
 else:
     st.info("No persistent trade history yet.")
 st.markdown("---")
@@ -450,15 +494,10 @@ with st.form(key='chat_form', clear_on_submit=True):
                 llm_response = ""
                 # Enhance LLM prompt with current chart context if available
                 chart_context = ""
-                try:
-                    # Attempt to get the latest SMA values for LLM context
-                    # This requires re-fetching or passing data, which can be complex.
-                    # For simplicity, we'll just tell it about the current rate.
+                if live_rate is not None:
                     chart_context = f"The current USD to INR rate is ₹{live_rate:.2f}. "
-                    # If you want to feed SMA values, you'd need to calculate them here
-                    # or pass them from the cached chart function.
-                except Exception:
-                    pass # Ignore if live_rate not available
+                # Further context like SMA values could be added here if needed
+                # (e.g., by passing them from the chart function or re-calculating on cached data)
 
                 llm_input_with_context = f"{chart_context}Human: {user_input}"
                 llm_response = st.session_state.conversation.predict(input=llm_input_with_context)
