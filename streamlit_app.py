@@ -3,11 +3,17 @@
 import streamlit as st
 import os
 import pandas as pd
-import plotly.graph_objects as go # For candlestick chart
-import numpy as np # For numerical operations
+import plotly.graph_objects as go
+import numpy as np
+import time # For sleep in auto-refresh
 
-# Ensure data_fetcher.py is in the same directory and contains get_usd_inr_rate()
-from data_fetcher import get_usd_inr_rate, get_yfinance_candlestick_data
+# Firebase imports
+from firebase_admin import credentials, initialize_app
+from firebase_admin import firestore
+from firebase_admin import auth
+
+# Ensure data_fetcher.py is in the same directory
+from data_fetcher import get_usd_inr_rate, get_alpha_vantage_candlestick_data
 
 # Import LangChain components for HuggingFaceHub
 from langchain_community.llms import HuggingFaceHub
@@ -15,49 +21,143 @@ from langchain.chains import ConversationChain
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
 
-# --- Configuration and LLM Setup ---
-# Set your Hugging Face API key from environment variable for security
-# It's highly recommended to set this as an environment variable (e.g., in your .bashrc, .zshrc, or system settings)
-# Example of how to set it in your terminal (for current session only):
-# export HF_TOKEN="hf_YOUR_ACTUAL_TOKEN_HERE"
+# --- Firebase Initialization (Only once) ---
+# Global variables provided by Canvas for Firebase
+app_id = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+firebase_config = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+initial_auth_token = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
-# Attempt to retrieve the token from environment variables
+if not firebase_admin._apps:
+    try:
+        # Use credentials from firebase_config
+        cred = credentials.Certificate(firebase_config)
+        initialize_app(cred)
+        st.success("Firebase initialized successfully!")
+    except Exception as e:
+        st.error(f"Error initializing Firebase: {e}")
+        st.stop()
+
+db = firestore.client()
+
+# --- User Authentication (Anonymous for simplicity) ---
+# This ensures we have a userId for Firestore operations
+@st.cache_resource
+def get_auth_client():
+    return auth.Client(app=firebase_admin.get_app())
+
+auth_client = get_auth_client()
+
+# Get or create user ID
+if 'user_id' not in st.session_state:
+    try:
+        if initial_auth_token:
+            # Sign in with custom token if provided (e.g., from Canvas environment)
+            decoded_token = auth_client.verify_id_token(initial_auth_token)
+            st.session_state.user_id = decoded_token['uid']
+            st.session_state.is_authenticated = True
+            print(f"DEBUG: Signed in with custom token. User ID: {st.session_state.user_id}")
+        else:
+            # Sign in anonymously if no custom token
+            anon_user = auth_client.create_user(uid=str(uuid.uuid4())) # Create a new anonymous user
+            st.session_state.user_id = anon_user.uid
+            st.session_state.is_authenticated = True
+            print(f"DEBUG: Signed in anonymously. User ID: {st.session_state.user_id}")
+    except Exception as e:
+        st.error(f"Error during authentication: {e}")
+        st.session_state.user_id = "anonymous_user" # Fallback
+        st.session_state.is_authenticated = False
+        print(f"DEBUG: Authentication failed, using fallback user ID. Error: {e}")
+else:
+    print(f"DEBUG: User already authenticated. User ID: {st.session_state.user_id}")
+
+user_id = st.session_state.user_id
+st.sidebar.write(f"Logged in as: {user_id}")
+
+
+# --- Firestore Helpers ---
+@st.cache_data(ttl=60) # Cache portfolio data for 1 minute
+def load_portfolio_from_firestore(uid):
+    doc_ref = db.collection(f"artifacts/{app_id}/users/{uid}/portfolio").document("current_portfolio")
+    doc = doc_ref.get()
+    if doc.exists:
+        data = doc.to_dict()
+        print(f"DEBUG: Loaded portfolio: {data}")
+        return data.get('inr_balance', 100000.0), data.get('usd_held', 0.0)
+    print("DEBUG: No portfolio found, initializing default.")
+    return 100000.0, 0.0
+
+def save_portfolio_to_firestore(uid, inr_balance, usd_held):
+    doc_ref = db.collection(f"artifacts/{app_id}/users/{uid}/portfolio").document("current_portfolio")
+    doc_ref.set({'inr_balance': inr_balance, 'usd_held': usd_held})
+    print(f"DEBUG: Saved portfolio: INR={inr_balance}, USD={usd_held}")
+
+@st.cache_data(ttl=60) # Cache trade history for 1 minute
+def load_trade_history_from_firestore(uid):
+    doc_ref = db.collection(f"artifacts/{app_id}/users/{uid}/trade_history").document("history_list")
+    doc = doc_ref.get()
+    if doc.exists:
+        data = doc.to_dict()
+        # Firestore stores lists as arrays, but sometimes complex objects need JSON stringify
+        history_json = data.get('trades', '[]')
+        try:
+            return json.loads(history_json) if isinstance(history_json, str) else history_json
+        except json.JSONDecodeError:
+            print(f"WARNING: Could not decode trade history JSON: {history_json}")
+            return []
+    print("DEBUG: No trade history found, initializing empty.")
+    return []
+
+def save_trade_history_to_firestore(uid, trade_history):
+    doc_ref = db.collection(f"artifacts/{app_id}/users/{uid}/trade_history").document("history_list")
+    # Convert to JSON string if it contains complex objects not directly supported by Firestore
+    doc_ref.set({'trades': json.dumps(trade_history)})
+    print(f"DEBUG: Saved trade history ({len(trade_history)} entries)")
+
+import json # Import json for stringify/parse
+import uuid # For anonymous user ID if auth token is not present
+
+# --- Initialize Virtual Portfolio in Session State (and load from Firestore) ---
+if 'inr_balance' not in st.session_state:
+    st.session_state.inr_balance, st.session_state.usd_held = load_portfolio_from_firestore(user_id)
+if 'usd_held' not in st.session_state: # Redundant check but harmless
+    pass
+if 'trade_history' not in st.session_state:
+    st.session_state.trade_history = load_trade_history_from_firestore(user_id)
+
+def reset_portfolio():
+    """Resets the virtual portfolio to initial values and clears Firestore."""
+    st.session_state.inr_balance = 100000.0
+    st.session_state.usd_held = 0.0
+    st.session_state.trade_history = []
+    save_portfolio_to_firestore(user_id, st.session_state.inr_balance, st.session_state.usd_held)
+    save_trade_history_to_firestore(user_id, st.session_state.trade_history)
+    st.success("Portfolio reset successfully!")
+    st.rerun() # Rerun to reflect changes
+
+
+# --- Hugging Face LLM Setup ---
 hf_token_value = os.getenv("HF_TOKEN")
-
-# --- Debugging print statements for HF_TOKEN ---
-print(f"DEBUG: Initial HF_TOKEN value from environment: {hf_token_value}")
-
 if not hf_token_value:
     st.error("Error: Hugging Face API token (HF_TOKEN) not found. Please set it as an environment variable.")
     st.info("Example: In your terminal, run `export HF_TOKEN=\"YOUR_ACTUAL_HF_TOKEN_HERE\"`")
-    st.stop() # Stop the app if token is missing
-
-# Assign the retrieved value to HF_TOKEN for use in HuggingFaceHub
+    st.stop()
 HF_TOKEN = hf_token_value
-print(f"DEBUG: HF_TOKEN assigned for LLM: {HF_TOKEN[:5]}...{HF_TOKEN[-5:]}") # Print partial token for security
 
-# Initialize HuggingFaceHub LLM
-llm = None # Initialize llm to None
+llm = None
 try:
     llm = HuggingFaceHub(
-        repo_id="HuggingFaceTB/SmolLM3-3B", # Using the previous Hugging Face model
+        repo_id="HuggingFaceTB/SmolLM3-3B",
         huggingfacehub_api_token=HF_TOKEN,
         model_kwargs={"temperature": 0.7, "max_new_tokens": 256}
     )
-    print("DEBUG: HuggingFaceHub LLM initialized successfully.")
 except Exception as e:
     st.error(f"Error initializing HuggingFaceHub LLM: {e}")
     st.info("Please check your HF_TOKEN and ensure the model 'HuggingFaceTB/SmolLM3-3B' is accessible.")
     st.stop()
 
-# Ensure LLM is not None before proceeding
-if llm is None:
-    st.error("LLM object is None after initialization attempt. Cannot proceed.")
-    st.stop()
-
-
 # Setup LangChain conversational chain with memory
 template = """You are a helpful AI assistant specialized in USD to INR exchange rates and general forex trends.
+You can analyze the provided chart data (candlesticks and SMAs) to give insights.
 If the user asks for the current USD to INR price, you should provide it.
 Keep your responses concise and to the point.
 
@@ -67,32 +167,16 @@ Human: {input}
 AI:"""
 prompt = PromptTemplate(input_variables=["history", "input"], template=template)
 
-# Initialize memory for the conversation
 if "conversation" not in st.session_state:
     st.session_state.conversation = ConversationChain(
         llm=llm,
         memory=ConversationBufferMemory(ai_prefix="AI"),
         prompt=prompt,
-        verbose=False # Set to False to suppress the "think" block
+        verbose=False
     )
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
-
-# --- Initialize Virtual Portfolio in Session State ---
-if 'inr_balance' not in st.session_state:
-    st.session_state.inr_balance = 100000.0 # Starting INR balance
-if 'usd_held' not in st.session_state:
-    st.session_state.usd_held = 0.0 # Starting USD held
-if 'trade_history' not in st.session_state:
-    st.session_state.trade_history = [] # List to store trade records
-
-def reset_portfolio():
-    """Resets the virtual portfolio to initial values."""
-    st.session_state.inr_balance = 100000.0
-    st.session_state.usd_held = 0.0
-    st.session_state.trade_history = []
-    st.success("Portfolio reset successfully!")
 
 # --- Streamlit App Interface ---
 st.set_page_config(
@@ -120,13 +204,12 @@ try:
     )
 except Exception as e:
     st.error(f"⚠️ Error fetching live rate: {e}")
-    st.info("Ensure your `data_fetcher.py` is correctly set up to retrieve the rate.")
+    st.info("Ensure your `data_fetcher.py` is correctly set up to retrieve the rate and `ALPHA_VANTAGE_API_KEY` is set.")
 st.markdown("---")
 
 
 # --- Virtual Portfolio Display ---
-st.header("💰 Virtual Portfolio Status")
-current_portfolio_value_usd = st.session_state.usd_held
+st.header("💰 Virtual Portfolio Status (Persistent)")
 current_portfolio_value_inr = st.session_state.inr_balance + (st.session_state.usd_held * live_rate)
 
 col_bal1, col_bal2, col_bal3 = st.columns(3)
@@ -141,48 +224,36 @@ st.button("Reset Portfolio", on_click=reset_portfolio)
 st.markdown("---")
 
 
-# --- Historical Candlestick Chart Section (USD/INR) ---
-st.header("📊 Historical USD/INR Candlestick Chart (YFinance)")
+# --- Live Candlestick Chart Section (USD/INR) ---
+st.header("📊 Live USD/INR Candlestick Chart (Alpha Vantage)")
+st.warning("Note: Alpha Vantage free tier has rate limits (e.g., 5 requests/minute). Chart data refreshes every 5 minutes to avoid hitting limits.")
 
-# Selectbox for time period for YFinance
-time_period_options = {
-    "1 Month": "1mo",
-    "3 Months": "3mo",
-    "6 Months": "6mo",
-    "1 Year": "1y",
-    "5 Years": "5y",
-    "Max": "max"
+# Selectbox for interval for Alpha Vantage
+interval_options = {
+    "1 Minute": "1min",
+    "5 Minutes": "5min",
+    "15 Minutes": "15min",
+    "30 Minutes": "30min",
+    "1 Hour": "60min",
 }
-selected_period_label = st.selectbox(
-    "Select Time Period for USD/INR Chart:",
-    list(time_period_options.keys()),
-    index=0 # Default to 1 Month
+selected_interval_label = st.selectbox(
+    "Select Candlestick Interval:",
+    list(interval_options.keys()),
+    index=1 # Default to 5 Minutes
 )
-selected_period_yf = time_period_options[selected_period_label]
+selected_interval_av = interval_options[selected_interval_label]
 
-st.info("Note: YFinance typically provides daily candlestick data for USD/INR. Intraday intervals are not available.")
-
-# Sliders for SMA periods
-col1, col2 = st.columns(2)
-with col1:
-    short_sma_period = st.slider("Short SMA Period (Days)", min_value=5, max_value=50, value=20, step=1)
-with col2:
-    long_sma_period = st.slider("Long SMA Period (Days)", min_value=20, max_value=200, value=50, step=5)
-
-if short_sma_period >= long_sma_period:
-    st.warning("Short SMA period should be less than Long SMA period for meaningful analysis.")
-
-
-# Cache the data for a reasonable period (e.g., 1 hour for historical data)
-@st.cache_data(ttl=3600) # Cache for 1 hour
-def get_and_plot_yfinance_candlesticks_with_signals(symbol, period, short_sma, long_sma):
+# Cache the data for 5 minutes (300 seconds) to respect Alpha Vantage free tier limits
+@st.cache_data(ttl=300)
+def get_and_plot_alpha_vantage_candlesticks_with_signals(symbol, to_symbol, interval, short_sma, long_sma):
     """
-    Fetches YFinance candlestick data, calculates SMAs, generates signals,
+    Fetches Alpha Vantage candlestick data, calculates SMAs, generates signals,
     and creates a Plotly chart.
     """
     try:
-        # Use '1d' interval for daily candles, as more granular is usually not available for forex
-        candlestick_df = get_yfinance_candlestick_data(symbol=symbol, period=period, interval="1d")
+        candlestick_df = get_alpha_vantage_candlestick_data(
+            symbol=symbol, to_symbol=to_symbol, interval=interval, outputsize="compact"
+        )
 
         if not candlestick_df.empty:
             # Calculate SMAs
@@ -190,77 +261,26 @@ def get_and_plot_yfinance_candlesticks_with_signals(symbol, period, short_sma, l
             candlestick_df['SMA_Long'] = candlestick_df['Close'].rolling(window=long_sma).mean()
 
             # Generate Signals
-            # Initialize 'Signal' column: 0 for no signal, 1 for buy, -1 for sell
             candlestick_df['Signal'] = 0
-            # When short SMA crosses above long SMA (Buy signal)
             candlestick_df.loc[candlestick_df['SMA_Short'] > candlestick_df['SMA_Long'], 'Signal'] = 1
-            # When short SMA crosses below long SMA (Sell signal)
             candlestick_df.loc[candlestick_df['SMA_Short'] < candlestick_df['SMA_Long'], 'Signal'] = -1
-
-            # Identify actual crossover points for plotting and trading
-            # A '1' in 'Position' means a buy signal, '-1' means a sell signal
             candlestick_df['Position'] = candlestick_df['Signal'].diff()
 
-            # --- Trading Simulation ---
-            # Reset portfolio for this simulation run based on selected chart period
-            # This ensures the simulation starts fresh with the displayed data
-            current_inr_balance = 100000.0 # Starting balance for simulation
-            current_usd_held = 0.0
-            simulation_trade_history = []
-            trade_amount_inr = 10000.0 # Amount of INR to use for each trade
-
+            # --- Trading Simulation (for chart display, not actual portfolio updates) ---
+            # This simulation is for visualizing signals on the chart, not for the persistent portfolio
             buy_markers_x = []
             buy_markers_y = []
             sell_markers_x = []
             sell_markers_y = []
 
-            # Iterate through the DataFrame to simulate trades
-            for i, row in candlestick_df.iterrows():
-                if row['Position'] == 1: # Buy signal
-                    if current_inr_balance >= trade_amount_inr:
-                        usd_bought = trade_amount_inr / row['Close']
-                        current_inr_balance -= trade_amount_inr
-                        current_usd_held += usd_bought
-                        simulation_trade_history.append({
-                            'Date': i.strftime('%Y-%m-%d'),
-                            'Type': 'BUY',
-                            'Amount (INR)': trade_amount_inr,
-                            'USD Bought': f"{usd_bought:.2f}",
-                            'Price': f"₹{row['Close']:.2f}",
-                            'INR Balance': f"₹{current_inr_balance:,.2f}",
-                            'USD Held': f"${current_usd_held:,.2f}"
-                        })
-                        buy_markers_x.append(i)
-                        buy_markers_y.append(row['Close'])
-                    # else: st.info("Not enough INR to buy.") # Don't show in loop
-                elif row['Position'] == -1: # Sell signal
-                    if current_usd_held > 0:
-                        # Sell all held USD for simplicity
-                        inr_sold = current_usd_held * row['Close']
-                        current_inr_balance += inr_sold
-                        usd_sold = current_usd_held
-                        current_usd_held = 0.0 # Sold all USD
-                        simulation_trade_history.append({
-                            'Date': i.strftime('%Y-%m-%d'),
-                            'Type': 'SELL',
-                            'Amount (INR)': f"{inr_sold:,.2f}",
-                            'USD Sold': f"{usd_sold:.2f}",
-                            'Price': f"₹{row['Close']:.2f}",
-                            'INR Balance': f"₹{current_inr_balance:,.2f}",
-                            'USD Held': f"${current_usd_held:,.2f}"
-                        })
-                        sell_markers_x.append(i)
-                        sell_markers_y.append(row['Close'])
-                    # else: st.info("No USD to sell.") # Don't show in loop
-
-            # --- Update global session state with simulation results ---
-            # This is to show the *final* balance for the selected period's simulation
-            # Note: This will overwrite the main portfolio display if you change chart period
-            # For a persistent portfolio, trade execution would be outside this cached function
-            st.session_state.inr_balance_sim = current_inr_balance
-            st.session_state.usd_held_sim = current_usd_held
-            st.session_state.trade_history_sim = simulation_trade_history
-
+            # Find points where position changes
+            for i in range(1, len(candlestick_df)):
+                if candlestick_df['Position'].iloc[i] == 1: # Buy signal
+                    buy_markers_x.append(candlestick_df.index[i])
+                    buy_markers_y.append(candlestick_df['Close'].iloc[i])
+                elif candlestick_df['Position'].iloc[i] == -1: # Sell signal
+                    sell_markers_x.append(candlestick_df.index[i])
+                    sell_markers_y.append(candlestick_df['Close'].iloc[i])
 
             # --- Plotting ---
             fig = go.Figure(data=[go.Candlestick(
@@ -272,7 +292,6 @@ def get_and_plot_yfinance_candlesticks_with_signals(symbol, period, short_sma, l
                 name='Candlesticks'
             )])
 
-            # Add Short SMA
             fig.add_trace(go.Scatter(
                 x=candlestick_df.index,
                 y=candlestick_df['SMA_Short'],
@@ -296,60 +315,113 @@ def get_and_plot_yfinance_candlesticks_with_signals(symbol, period, short_sma, l
                 y=buy_markers_y,
                 mode='markers',
                 marker=dict(symbol='triangle-up', size=10, color='green'),
-                name='Simulated Buy'
+                name='Buy Signal'
             ))
 
-            # Add Sell signals (from simulation)
             fig.add_trace(go.Scatter(
                 x=sell_markers_x,
                 y=sell_markers_y,
                 mode='markers',
                 marker=dict(symbol='triangle-down', size=10, color='red'),
-                name='Simulated Sell'
+                name='Sell Signal'
             ))
 
-
             fig.update_layout(
-                title=f'{symbol} Candlestick Chart with SMAs & Simulated Trades ({selected_period_label} - Daily)',
-                xaxis_title='Date',
+                title=f'{symbol}/{to_symbol} Candlestick Chart with SMAs ({selected_interval_label})',
+                xaxis_title='Time',
                 yaxis_title='Price (INR)',
-                xaxis_rangeslider_visible=False, # Hide the range slider for cleaner look
-                hovermode="x unified" # Show hover info for all traces at a given x-coordinate
+                xaxis_rangeslider_visible=False,
+                hovermode="x unified"
             )
             st.plotly_chart(fig, use_container_width=True)
 
-            # Display Simulation Results below the chart
-            st.subheader("📈 Simulation Results for Selected Period")
-            st.write(f"**Final INR Balance:** ₹{st.session_state.inr_balance_sim:,.2f}")
-            st.write(f"**Final USD Held:** ${st.session_state.usd_held_sim:,.2f}")
-            # Ensure candlestick_df is not empty before accessing iloc[-1]
-            if not candlestick_df.empty:
-                st.write(f"**Total Simulated Portfolio Value (at end of period):** ₹{st.session_state.inr_balance_sim + (st.session_state.usd_held_sim * candlestick_df['Close'].iloc[-1]):,.2f}")
-            else:
-                st.write("**Total Simulated Portfolio Value (at end of period):** N/A (No chart data)")
-
-
-            if st.session_state.trade_history_sim:
-                st.subheader("Trade History (Simulation)")
-                trade_df = pd.DataFrame(st.session_state.trade_history_sim)
-                st.dataframe(trade_df)
-            else:
-                st.info("No trades executed in this simulation period.")
-
-
         else:
-            st.info("No historical candlestick data available to display for the selected period.")
+            st.info("No candlestick data available to display for the selected period/interval. Check API key or limits.")
     except Exception as e:
         st.error(f"Error displaying USD/INR candlestick chart: {e}")
 
+# Sliders for SMA periods
+col_sma1, col_sma2 = st.columns(2)
+with col_sma1:
+    short_sma_period = st.slider("Short SMA Period (Candles)", min_value=5, max_value=50, value=20, step=1)
+with col_sma2:
+    long_sma_period = st.slider("Long SMA Period (Candles)", min_value=20, max_value=200, value=50, step=5)
+
+if short_sma_period >= long_sma_period:
+    st.warning("Short SMA period should be less than Long SMA period for meaningful analysis.")
+
+
 # Call the function to display the chart for USD/INR with signals
-get_and_plot_yfinance_candlesticks_with_signals(
-    symbol="USDINR=X",
-    period=selected_period_yf,
+get_and_plot_alpha_vantage_candlesticks_with_signals(
+    symbol="USD",
+    to_symbol="INR",
+    interval=selected_interval_av,
     short_sma=short_sma_period,
     long_sma=long_sma_period
 )
 
+st.markdown("---")
+
+
+# --- Manual Trade Execution (Updates Persistent Portfolio) ---
+st.header("🛒 Manual Trade Execution")
+st.markdown("Execute trades directly to update your persistent virtual portfolio.")
+
+col_trade_amount, col_trade_buttons = st.columns([0.7, 0.3])
+with col_trade_amount:
+    trade_amount_usd = st.number_input("Amount to Trade (USD)", min_value=0.01, value=100.0, step=10.0)
+
+with col_trade_buttons:
+    st.write("") # Spacer
+    st.write("") # Spacer
+    if st.button("Buy USD"):
+        cost_inr = trade_amount_usd * live_rate
+        if st.session_state.inr_balance >= cost_inr:
+            st.session_state.inr_balance -= cost_inr
+            st.session_state.usd_held += trade_amount_usd
+            st.session_state.trade_history.append({
+                'Date': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'Type': 'MANUAL BUY',
+                'Amount (USD)': f"{trade_amount_usd:.2f}",
+                'Cost (INR)': f"₹{cost_inr:,.2f}",
+                'Price': f"₹{live_rate:.2f}",
+                'INR Balance': f"₹{st.session_state.inr_balance:,.2f}",
+                'USD Held': f"${st.session_state.usd_held:,.2f}"
+            })
+            save_portfolio_to_firestore(user_id, st.session_state.inr_balance, st.session_state.usd_held)
+            save_trade_history_to_firestore(user_id, st.session_state.trade_history)
+            st.success(f"Successfully bought ${trade_amount_usd:.2f} USD!")
+            st.rerun()
+        else:
+            st.error("Insufficient INR balance to buy USD.")
+
+    if st.button("Sell USD"):
+        if st.session_state.usd_held >= trade_amount_usd:
+            revenue_inr = trade_amount_usd * live_rate
+            st.session_state.inr_balance += revenue_inr
+            st.session_state.usd_held -= trade_amount_usd
+            st.session_state.trade_history.append({
+                'Date': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'Type': 'MANUAL SELL',
+                'Amount (USD)': f"{trade_amount_usd:.2f}",
+                'Revenue (INR)': f"₹{revenue_inr:,.2f}",
+                'Price': f"₹{live_rate:.2f}",
+                'INR Balance': f"₹{st.session_state.inr_balance:,.2f}",
+                'USD Held': f"${st.session_state.usd_held:,.2f}"
+            })
+            save_portfolio_to_firestore(user_id, st.session_state.inr_balance, st.session_state.usd_held)
+            save_trade_history_to_firestore(user_id, st.session_state.trade_history)
+            st.success(f"Successfully sold ${trade_amount_usd:.2f} USD!")
+            st.rerun()
+        else:
+            st.error("Insufficient USD held to sell.")
+
+st.subheader("Persistent Trade History")
+if st.session_state.trade_history:
+    trade_df_persistent = pd.DataFrame(st.session_state.trade_history)
+    st.dataframe(trade_df_persistent)
+else:
+    st.info("No persistent trade history yet.")
 st.markdown("---")
 
 
@@ -368,7 +440,7 @@ with st.form(key='chat_form', clear_on_submit=True):
     user_input = st.text_input("🧠 Ask a question:", key="user_question_input")
     submit_button = st.form_submit_button(label='Send')
 
-    if submit_button and user_input: # Process only when button is clicked and input is not empty
+    if submit_button and user_input:
         if user_input.lower() == 'exit':
             st.session_state.chat_history.append({"role": "user", "content": user_input})
             st.session_state.chat_history.append({"role": "bot", "content": "Goodbye! The bot session has ended."})
@@ -376,16 +448,20 @@ with st.form(key='chat_form', clear_on_submit=True):
             st.session_state.chat_history.append({"role": "user", "content": user_input})
             with st.spinner("🤖 Thinking..."):
                 llm_response = ""
-                # Check if the user's question explicitly asks for the rate
-                if "usd" in user_input.lower() and "inr" in user_input.lower() and ("price" in user_input.lower() or "rate" in user_input.lower()):
-                    try:
-                        rate = get_usd_inr_rate()
-                        llm_response = f"The current USD to INR exchange rate is ₹{rate:.2f}."
-                    except Exception:
-                        llm_response = "I couldn't fetch the live USD to INR rate at the moment, but I can still discuss forex trends."
-                else:
-                    # Use the conversational chain for other questions
-                    llm_response = st.session_state.conversation.predict(input=user_input)
+                # Enhance LLM prompt with current chart context if available
+                chart_context = ""
+                try:
+                    # Attempt to get the latest SMA values for LLM context
+                    # This requires re-fetching or passing data, which can be complex.
+                    # For simplicity, we'll just tell it about the current rate.
+                    chart_context = f"The current USD to INR rate is ₹{live_rate:.2f}. "
+                    # If you want to feed SMA values, you'd need to calculate them here
+                    # or pass them from the cached chart function.
+                except Exception:
+                    pass # Ignore if live_rate not available
+
+                llm_input_with_context = f"{chart_context}Human: {user_input}"
+                llm_response = st.session_state.conversation.predict(input=llm_input_with_context)
 
                 st.session_state.chat_history.append({"role": "bot", "content": llm_response})
 

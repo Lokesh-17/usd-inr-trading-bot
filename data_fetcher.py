@@ -1,66 +1,123 @@
 # data_fetcher.py
 
-import yfinance as yf
+import requests
 import pandas as pd
 import datetime
+import os
+
+# --- Alpha Vantage API Configuration ---
+ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
+ALPHA_VANTAGE_BASE_URL = "https://www.alphavantage.co/query"
+
+# Check if API key is set
+if not ALPHA_VANTAGE_API_KEY:
+    print("WARNING: ALPHA_VANTAGE_API_KEY environment variable is not set. Data fetching will fail.")
+
 
 def get_usd_inr_rate():
     """
-    Fetches the current USD to INR exchange rate using yfinance.
+    Fetches the current USD to INR exchange rate from Alpha Vantage.
+    Uses FX_DAILY for a recent close price, as real-time tick data is paid.
     """
+    if not ALPHA_VANTAGE_API_KEY:
+        raise ValueError("ALPHA_VANTAGE_API_KEY is not set.")
+
+    params = {
+        "function": "FX_DAILY",
+        "from_symbol": "USD",
+        "to_symbol": "INR",
+        "apikey": ALPHA_VANTAGE_API_KEY
+    }
+
     try:
-        # USDINR=X is the Yahoo Finance symbol for USD/INR
-        ticker = yf.Ticker("USDINR=X")
-        # Get the most recent data point
-        data = ticker.history(period="1d")
+        response = requests.get(ALPHA_VANTAGE_BASE_URL, params=params)
+        response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
+        data = response.json()
 
-        if not data.empty:
-            # The 'Close' price for the most recent day
-            return data['Close'].iloc[-1]
+        if "Time Series FX (Daily)" in data:
+            # Get the most recent day's data
+            latest_day = list(data["Time Series FX (Daily)"].keys())[0]
+            current_rate = float(data["Time Series FX (Daily)"][latest_day]["4. close"])
+            return current_rate
+        elif "Error Message" in data:
+            raise ValueError(f"Alpha Vantage API Error: {data['Error Message']}")
         else:
-            raise ValueError("No data found for USDINR=X. Check the ticker symbol or market availability.")
+            raise ValueError(f"Unexpected response from Alpha Vantage API for current rate: {data}")
 
+    except requests.exceptions.RequestException as e:
+        raise ConnectionError(f"Could not connect to Alpha Vantage API for current price: {e}")
+    except ValueError as e:
+        raise ValueError(f"Error parsing Alpha Vantage API response for current price: {e}")
     except Exception as e:
-        raise Exception(f"Failed to fetch current USD/INR rate from yfinance: {e}")
+        raise Exception(f"An unexpected error occurred while fetching current price: {e}")
 
-def get_yfinance_candlestick_data(symbol="USDINR=X", period="1mo", interval="1d"):
+
+def get_alpha_vantage_candlestick_data(symbol="USD", to_symbol="INR", interval="60min", outputsize="compact"):
     """
-    Fetches historical candlestick data (OHLC) for a given symbol from yfinance.
-    Note: For forex pairs like USDINR=X, yfinance typically provides daily intervals.
-    Intraday intervals (like 1m, 5m, 1h) are usually not available for forex on yfinance.
+    Fetches intraday candlestick data (OHLCV) for a given forex pair from Alpha Vantage.
+    Free tier limits apply: 5 requests/minute, 500 requests/day.
     Args:
-        symbol (str): Trading pair symbol (e.g., "USDINR=X").
-        period (str): Data period (e.g., "1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max").
-        interval (str): Data interval (e.g., "1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo").
-                      For USDINR=X, "1d" is usually the most granular available.
+        symbol (str): Base currency (e.g., "USD").
+        to_symbol (str): Target currency (e.g., "INR").
+        interval (str): Time interval (e.g., "1min", "5min", "15min", "30min", "60min").
+        outputsize (str): "compact" (last 100 points) or "full" (all available data).
     Returns:
-        pd.DataFrame: DataFrame with 'Open', 'High', 'Low', 'Close' columns and Datetime index.
+        pd.DataFrame: DataFrame with 'Open', 'High', 'Low', 'Close', 'Volume' columns and Datetime index.
     """
+    if not ALPHA_VANTAGE_API_KEY:
+        raise ValueError("ALPHA_VANTAGE_API_KEY is not set.")
+
+    params = {
+        "function": "FX_INTRADAY",
+        "from_symbol": symbol,
+        "to_symbol": to_symbol,
+        "interval": interval,
+        "outputsize": outputsize,
+        "apikey": ALPHA_VANTAGE_API_KEY
+    }
+
     try:
-        ticker = yf.Ticker(symbol)
-        hist_data = ticker.history(period=period, interval=interval)
+        response = requests.get(ALPHA_VANTAGE_BASE_URL, params=params)
+        response.raise_for_status()
+        data = response.json()
 
-        if not hist_data.empty:
-            # Reset index to make 'Date' a column for Plotly, then set it back as index
-            hist_data = hist_data.reset_index()
-            hist_data['Datetime'] = pd.to_datetime(hist_data['Date']) # Ensure Datetime is datetime
-            hist_data = hist_data.set_index('Datetime')
-            # Select only OHLC for the chart
-            return hist_data[['Open', 'High', 'Low', 'Close']]
+        time_series_key = f"Time Series FX ({interval})"
+        if time_series_key in data:
+            raw_data = data[time_series_key]
+            df = pd.DataFrame.from_dict(raw_data, orient='index', dtype=float)
+            df.index = pd.to_datetime(df.index)
+            df = df.sort_index() # Ensure chronological order
+
+            df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+            df.index.name = 'Datetime'
+            return df[['Open', 'High', 'Low', 'Close', 'Volume']]
+        elif "Error Message" in data:
+            raise ValueError(f"Alpha Vantage API Error: {data['Error Message']}")
+        elif "Note" in data:
+            # This often means rate limit hit
+            raise ConnectionError(f"Alpha Vantage API Note: {data['Note']}. Likely rate limit hit.")
         else:
-            raise ValueError(f"No historical data found for {symbol} for period {period} and interval {interval}.")
+            raise ValueError(f"Unexpected response from Alpha Vantage API for klines: {data}")
 
+    except requests.exceptions.RequestException as e:
+        raise ConnectionError(f"Could not connect to Alpha Vantage API for klines: {e}")
+    except ValueError as e:
+        raise ValueError(f"Error parsing Alpha Vantage API response for klines: {e}")
     except Exception as e:
-        raise Exception(f"Failed to fetch historical data from yfinance: {e}")
+        raise Exception(f"An unexpected error occurred while fetching klines: {e}")
 
 # Example of how to test this function (optional, for local debugging)
 if __name__ == "__main__":
+    # For local testing, set the environment variable temporarily:
+    # export ALPHA_VANTAGE_API_KEY="YOUR_ACTUAL_ALPHA_VANTAGE_API_KEY"
     try:
         current_rate = get_usd_inr_rate()
-        print(f"Current USD/INR rate (YFinance): ₹{current_rate:.2f}")
+        print(f"Current USD/INR rate (Alpha Vantage): ₹{current_rate:.2f}")
 
-        candlesticks = get_yfinance_candlestick_data(period='7d', interval='1d')
-        print("\nLast 7 Days USD/INR Candlesticks (YFinance):")
+        # Test with a 5-minute interval for the last 100 data points
+        candlesticks = get_alpha_vantage_candlestick_data(interval="5min", outputsize="compact")
+        print("\nLast 100 5-Minute USD/INR Candlesticks (Alpha Vantage):")
         print(candlesticks.head())
     except Exception as e:
         print(f"Error: {e}")
+
