@@ -17,7 +17,7 @@ import uuid # For generating a unique ID for the session (no persistence)
 from data_fetcher import get_usd_inr_rate, get_alpha_vantage_candlestick_data
 
 # Import LangChain components for HuggingFaceHub
-from langchain_community.llls import HuggingFaceHub
+from langchain_community.llms import HuggingFaceHub # CORRECTED: Changed 'llls' to 'llms'
 from langchain.chains import ConversationChain
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
