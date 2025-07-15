@@ -17,7 +17,7 @@ import uuid # For generating a unique ID for the session (no persistence)
 from data_fetcher import get_usd_inr_rate, get_alpha_vantage_candlestick_data
 
 # Import LangChain components for HuggingFaceHub
-from langchain_community.llms import HuggingFaceHub
+from langchain_community.llls import HuggingFaceHub
 from langchain.chains import ConversationChain
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
@@ -174,7 +174,7 @@ if short_sma_period >= long_sma_period:
 
 # Cache the data for 5 minutes (300 seconds) to respect Alpha Vantage free tier limits
 @st.cache_data(ttl=300)
-def get_and_plot_alpha_vantage_candlesticks_with_signals(symbol, to_symbol, interval, short_sma, long_sma):
+def plot_candlestick_chart(symbol, to_symbol, interval, short_sma, long_sma):
     """
     Fetches Alpha Vantage candlestick data, calculates SMAs, generates signals,
     and creates a Plotly chart.
@@ -268,7 +268,7 @@ def get_and_plot_alpha_vantage_candlesticks_with_signals(symbol, to_symbol, inte
         st.error(f"Error displaying USD/INR candlestick chart: {e}")
 
 # Call the function to display the chart for USD/INR with signals
-get_and_plot_alpha_vantage_candlestick_data(
+plot_candlestick_chart( # Renamed function call
     symbol="USD",
     to_symbol="INR",
     interval=selected_interval_av,
