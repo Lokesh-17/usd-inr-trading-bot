@@ -5,9 +5,11 @@ import os
 import pandas as pd
 import plotly.graph_objects as go # For candlestick chart
 import numpy as np # For numerical operations
+import time
+from datetime import datetime, timedelta
 
 # Ensure data_fetcher.py is in the same directory and contains get_usd_inr_rate()
-from data_fetcher import get_usd_inr_rate, get_yfinance_candlestick_data
+from data_fetcher import get_usd_inr_rate, get_yfinance_candlestick_data, get_current_rate_with_fallback, get_live_candlestick_data
 
 # Import LangChain components for HuggingFaceHub
 from langchain_community.llms import HuggingFaceHub
@@ -98,263 +100,356 @@ def reset_portfolio():
 st.set_page_config(
     page_title="USD/INR Trading Bot 💹",
     page_icon="💸",
-    layout="centered",
-    initial_sidebar_state="collapsed"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-st.title("💹 USD/INR Trading Bot with Virtual Portfolio")
-st.markdown("Ask me anything about USD to INR exchange rates or forex trends.")
+st.title("💹 USD/INR Trading Bot with Live Intraday Charts")
+st.markdown("Real-time USD/INR trading with intraday charts, SMA signals, and AI assistant.")
+
+# --- Sidebar Configuration ---
+with st.sidebar:
+    st.header("📊 Chart Settings")
+    
+    # Data Source Selection
+    data_source = st.selectbox(
+        "Data Source:",
+        ["Alpha Vantage (Intraday)", "Yahoo Finance (Daily)"],
+        help="Alpha Vantage provides true intraday data, Yahoo Finance provides daily data"
+    )
+    
+    # Timeframe Selection
+    if data_source == "Alpha Vantage (Intraday)":
+        timeframe_options = {
+            "1 Minute": "1min",
+            "5 Minutes": "5min", 
+            "15 Minutes": "15min",
+            "30 Minutes": "30min",
+            "60 Minutes": "60min",
+            "Daily": "1d"
+        }
+        selected_timeframe_label = st.selectbox(
+            "Chart Timeframe:",
+            list(timeframe_options.keys()),
+            index=1,  # Default to 5 minutes
+            help="Select the timeframe for intraday data"
+        )
+        selected_timeframe = timeframe_options[selected_timeframe_label]
+        data_source_key = 'alphavantage'
+    else:
+        # Yahoo Finance periods
+        timeframe_options = {
+            "1 Month": "1mo",
+            "3 Months": "3mo",
+            "6 Months": "6mo",
+            "1 Year": "1y",
+            "5 Years": "5y",
+            "Max": "max"
+        }
+        selected_timeframe_label = st.selectbox(
+            "Chart Period:",
+            list(timeframe_options.keys()),
+            index=0,  # Default to 1 Month
+            help="Select the time period for daily data"
+        )
+        selected_timeframe = timeframe_options[selected_timeframe_label]
+        data_source_key = 'yfinance'
+    
+    # SMA Settings
+    st.header("📈 SMA Settings")
+    short_sma_period = st.slider("Short SMA Period", min_value=5, max_value=50, value=20, step=1)
+    long_sma_period = st.slider("Long SMA Period", min_value=20, max_value=200, value=50, step=5)
+    
+    if short_sma_period >= long_sma_period:
+        st.warning("Short SMA period should be less than Long SMA period for meaningful analysis.")
+    
+    # Refresh Settings
+    st.header("🔄 Refresh Settings")
+    if data_source_key == 'alphavantage':
+        auto_refresh = st.checkbox("Auto-refresh chart", value=True)
+        if auto_refresh:
+            refresh_interval = st.slider("Refresh interval (seconds)", min_value=30, max_value=300, value=60, step=30)
+    else:
+        auto_refresh = st.checkbox("Auto-refresh chart", value=False)
+        refresh_interval = st.slider("Refresh interval (seconds)", min_value=300, max_value=3600, value=600, step=300)
 
 # Display current USD to INR rate prominently
 st.markdown("---")
-try:
-    live_rate = get_usd_inr_rate()
-    st.metric(label="Current USD to INR Rate", value=f"₹{live_rate:.2f} INR")
-    st.markdown(
-        """
-        <div style='text-align: center; color: gray; font-size: small;'>
-        (Live rate updates on app refresh or when asked)
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-except Exception as e:
-    st.error(f"⚠️ Error fetching live rate: {e}")
-    st.info("Ensure your `data_fetcher.py` is correctly set up to retrieve the rate.")
-st.markdown("---")
+col1, col2, col3 = st.columns([1, 2, 1])
 
+with col2:
+    try:
+        live_rate = get_current_rate_with_fallback()
+        st.metric(
+            label="Current USD to INR Rate", 
+            value=f"₹{live_rate:.2f} INR",
+            help="Live rate with automatic fallback between Alpha Vantage and Yahoo Finance"
+        )
+        st.markdown(
+            f"""
+            <div style='text-align: center; color: gray; font-size: small;'>
+            Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    except Exception as e:
+        st.error(f"⚠️ Error fetching live rate: {e}")
+        st.info("Please check your API keys and internet connection.")
+        live_rate = 83.0  # Fallback rate for calculations
+
+st.markdown("---")
 
 # --- Virtual Portfolio Display ---
-st.header("💰 Virtual Portfolio Status")
-current_portfolio_value_usd = st.session_state.usd_held
-current_portfolio_value_inr = st.session_state.inr_balance + (st.session_state.usd_held * live_rate)
+col1, col2 = st.columns([1, 1])
 
-col_bal1, col_bal2, col_bal3 = st.columns(3)
-with col_bal1:
-    st.metric(label="INR Balance", value=f"₹{st.session_state.inr_balance:,.2f}")
-with col_bal2:
-    st.metric(label="USD Held", value=f"${st.session_state.usd_held:,.2f}")
-with col_bal3:
-    st.metric(label="Total Portfolio Value (INR)", value=f"₹{current_portfolio_value_inr:,.2f}")
-
-st.button("Reset Portfolio", on_click=reset_portfolio)
-st.markdown("---")
-
-
-# --- Historical Candlestick Chart Section (USD/INR) ---
-st.header("📊 Historical USD/INR Candlestick Chart (YFinance)")
-
-# Selectbox for time period for YFinance
-time_period_options = {
-    "1 Month": "1mo",
-    "3 Months": "3mo",
-    "6 Months": "6mo",
-    "1 Year": "1y",
-    "5 Years": "5y",
-    "Max": "max"
-}
-selected_period_label = st.selectbox(
-    "Select Time Period for USD/INR Chart:",
-    list(time_period_options.keys()),
-    index=0 # Default to 1 Month
-)
-selected_period_yf = time_period_options[selected_period_label]
-
-st.info("Note: YFinance typically provides daily candlestick data for USD/INR. Intraday intervals are not available.")
-
-# Sliders for SMA periods
-col1, col2 = st.columns(2)
 with col1:
-    short_sma_period = st.slider("Short SMA Period (Days)", min_value=5, max_value=50, value=20, step=1)
+    st.header("💰 Virtual Portfolio Status")
+    current_portfolio_value_inr = st.session_state.inr_balance + (st.session_state.usd_held * live_rate)
+
+    portfolio_col1, portfolio_col2, portfolio_col3 = st.columns(3)
+    with portfolio_col1:
+        st.metric(label="INR Balance", value=f"₹{st.session_state.inr_balance:,.2f}")
+    with portfolio_col2:
+        st.metric(label="USD Held", value=f"${st.session_state.usd_held:,.2f}")
+    with portfolio_col3:
+        st.metric(label="Total Value (INR)", value=f"₹{current_portfolio_value_inr:,.2f}")
+
+    st.button("Reset Portfolio", on_click=reset_portfolio)
+
+# --- Live Chart Section ---
 with col2:
-    long_sma_period = st.slider("Long SMA Period (Days)", min_value=20, max_value=200, value=50, step=5)
-
-if short_sma_period >= long_sma_period:
-    st.warning("Short SMA period should be less than Long SMA period for meaningful analysis.")
-
-
-# Cache the data for a reasonable period (e.g., 1 hour for historical data)
-@st.cache_data(ttl=3600) # Cache for 1 hour
-def get_and_plot_yfinance_candlesticks_with_signals(symbol, period, short_sma, long_sma):
-    """
-    Fetches YFinance candlestick data, calculates SMAs, generates signals,
-    and creates a Plotly chart.
-    """
-    try:
-        # Use '1d' interval for daily candles, as more granular is usually not available for forex
-        candlestick_df = get_yfinance_candlestick_data(symbol=symbol, period=period, interval="1d")
-
-        if not candlestick_df.empty:
-            # Calculate SMAs
-            candlestick_df['SMA_Short'] = candlestick_df['Close'].rolling(window=short_sma).mean()
-            candlestick_df['SMA_Long'] = candlestick_df['Close'].rolling(window=long_sma).mean()
-
-            # Generate Signals
-            # Initialize 'Signal' column: 0 for no signal, 1 for buy, -1 for sell
-            candlestick_df['Signal'] = 0
-            # When short SMA crosses above long SMA (Buy signal)
-            candlestick_df.loc[candlestick_df['SMA_Short'] > candlestick_df['SMA_Long'], 'Signal'] = 1
-            # When short SMA crosses below long SMA (Sell signal)
-            candlestick_df.loc[candlestick_df['SMA_Short'] < candlestick_df['SMA_Long'], 'Signal'] = -1
-
-            # Identify actual crossover points for plotting and trading
-            # A '1' in 'Position' means a buy signal, '-1' means a sell signal
-            candlestick_df['Position'] = candlestick_df['Signal'].diff()
-
-            # --- Trading Simulation ---
-            # Reset portfolio for this simulation run based on selected chart period
-            # This ensures the simulation starts fresh with the displayed data
-            current_inr_balance = 100000.0 # Starting balance for simulation
-            current_usd_held = 0.0
-            simulation_trade_history = []
-            trade_amount_inr = 10000.0 # Amount of INR to use for each trade
-
-            buy_markers_x = []
-            buy_markers_y = []
-            sell_markers_x = []
-            sell_markers_y = []
-
-            # Iterate through the DataFrame to simulate trades
-            for i, row in candlestick_df.iterrows():
-                if row['Position'] == 1: # Buy signal
-                    if current_inr_balance >= trade_amount_inr:
-                        usd_bought = trade_amount_inr / row['Close']
-                        current_inr_balance -= trade_amount_inr
-                        current_usd_held += usd_bought
-                        simulation_trade_history.append({
-                            'Date': i.strftime('%Y-%m-%d'),
-                            'Type': 'BUY',
-                            'Amount (INR)': trade_amount_inr,
-                            'USD Bought': f"{usd_bought:.2f}",
-                            'Price': f"₹{row['Close']:.2f}",
-                            'INR Balance': f"₹{current_inr_balance:,.2f}",
-                            'USD Held': f"${current_usd_held:,.2f}"
-                        })
-                        buy_markers_x.append(i)
-                        buy_markers_y.append(row['Close'])
-                    # else: st.info("Not enough INR to buy.") # Don't show in loop
-                elif row['Position'] == -1: # Sell signal
-                    if current_usd_held > 0:
-                        # Sell all held USD for simplicity
-                        inr_sold = current_usd_held * row['Close']
-                        current_inr_balance += inr_sold
-                        usd_sold = current_usd_held
-                        current_usd_held = 0.0 # Sold all USD
-                        simulation_trade_history.append({
-                            'Date': i.strftime('%Y-%m-%d'),
-                            'Type': 'SELL',
-                            'Amount (INR)': f"{inr_sold:,.2f}",
-                            'USD Sold': f"{usd_sold:.2f}",
-                            'Price': f"₹{row['Close']:.2f}",
-                            'INR Balance': f"₹{current_inr_balance:,.2f}",
-                            'USD Held': f"${current_usd_held:,.2f}"
-                        })
-                        sell_markers_x.append(i)
-                        sell_markers_y.append(row['Close'])
-                    # else: st.info("No USD to sell.") # Don't show in loop
-
-            # --- Update global session state with simulation results ---
-            # This is to show the *final* balance for the selected period's simulation
-            # Note: This will overwrite the main portfolio display if you change chart period
-            # For a persistent portfolio, trade execution would be outside this cached function
-            st.session_state.inr_balance_sim = current_inr_balance
-            st.session_state.usd_held_sim = current_usd_held
-            st.session_state.trade_history_sim = simulation_trade_history
-
-
-            # --- Plotting ---
-            fig = go.Figure(data=[go.Candlestick(
-                x=candlestick_df.index,
-                open=candlestick_df['Open'],
-                high=candlestick_df['High'],
-                low=candlestick_df['Low'],
-                close=candlestick_df['Close'],
-                name='Candlesticks'
-            )])
-
-            # Add Short SMA
-            fig.add_trace(go.Scatter(
-                x=candlestick_df.index,
-                y=candlestick_df['SMA_Short'],
-                mode='lines',
-                name=f'SMA {short_sma}',
-                line=dict(color='blue', width=1)
-            ))
-
-            # Add Long SMA
-            fig.add_trace(go.Scatter(
-                x=candlestick_df.index,
-                y=candlestick_df['SMA_Long'],
-                mode='lines',
-                name=f'SMA {long_sma}',
-                line=dict(color='orange', width=1)
-            ))
-
-            # Add Buy signals (from simulation)
-            fig.add_trace(go.Scatter(
-                x=buy_markers_x,
-                y=buy_markers_y,
-                mode='markers',
-                marker=dict(symbol='triangle-up', size=10, color='green'),
-                name='Simulated Buy'
-            ))
-
-            # Add Sell signals (from simulation)
-            fig.add_trace(go.Scatter(
-                x=sell_markers_x,
-                y=sell_markers_y,
-                mode='markers',
-                marker=dict(symbol='triangle-down', size=10, color='red'),
-                name='Simulated Sell'
-            ))
-
-
-            fig.update_layout(
-                title=f'{symbol} Candlestick Chart with SMAs & Simulated Trades ({selected_period_label} - Daily)',
-                xaxis_title='Date',
-                yaxis_title='Price (INR)',
-                xaxis_rangeslider_visible=False, # Hide the range slider for cleaner look
-                hovermode="x unified" # Show hover info for all traces at a given x-coordinate
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-            # Display Simulation Results below the chart
-            st.subheader("📈 Simulation Results for Selected Period")
-            st.write(f"**Final INR Balance:** ₹{st.session_state.inr_balance_sim:,.2f}")
-            st.write(f"**Final USD Held:** ${st.session_state.usd_held_sim:,.2f}")
-            # Ensure candlestick_df is not empty before accessing iloc[-1]
-            if not candlestick_df.empty:
-                st.write(f"**Total Simulated Portfolio Value (at end of period):** ₹{st.session_state.inr_balance_sim + (st.session_state.usd_held_sim * candlestick_df['Close'].iloc[-1]):,.2f}")
-            else:
-                st.write("**Total Simulated Portfolio Value (at end of period):** N/A (No chart data)")
-
-
-            if st.session_state.trade_history_sim:
-                st.subheader("Trade History (Simulation)")
-                trade_df = pd.DataFrame(st.session_state.trade_history_sim)
-                st.dataframe(trade_df)
-            else:
-                st.info("No trades executed in this simulation period.")
-
-
+    st.header(f"📊 Live USD/INR Chart ({selected_timeframe_label})")
+    
+    # Determine cache TTL based on timeframe
+    if data_source_key == 'alphavantage':
+        if selected_timeframe in ['1min', '5min']:
+            cache_ttl = 60  # 1 minute for very short timeframes
+        elif selected_timeframe in ['15min', '30min']:
+            cache_ttl = 300  # 5 minutes for medium timeframes
+        elif selected_timeframe == '60min':
+            cache_ttl = 600  # 10 minutes for hourly
         else:
-            st.info("No historical candlestick data available to display for the selected period.")
-    except Exception as e:
-        st.error(f"Error displaying USD/INR candlestick chart: {e}")
+            cache_ttl = 3600  # 1 hour for daily
+    else:
+        cache_ttl = 3600  # 1 hour for Yahoo Finance
 
-# Call the function to display the chart for USD/INR with signals
-get_and_plot_yfinance_candlesticks_with_signals(
-    symbol="USDINR=X",
-    period=selected_period_yf,
-    short_sma=short_sma_period,
-    long_sma=long_sma_period
-)
+    @st.cache_data(ttl=cache_ttl)
+    def get_and_plot_live_candlesticks_with_signals(timeframe, data_source, short_sma, long_sma):
+        """
+        Fetches live candlestick data, calculates SMAs, generates signals,
+        and creates a Plotly chart.
+        """
+        try:
+            # Get live data
+            candlestick_df = get_live_candlestick_data(timeframe=timeframe, data_source=data_source)
+
+            if not candlestick_df.empty:
+                # Calculate SMAs
+                candlestick_df['SMA_Short'] = candlestick_df['Close'].rolling(window=short_sma).mean()
+                candlestick_df['SMA_Long'] = candlestick_df['Close'].rolling(window=long_sma).mean()
+
+                # Generate Signals
+                candlestick_df['Signal'] = 0
+                candlestick_df.loc[candlestick_df['SMA_Short'] > candlestick_df['SMA_Long'], 'Signal'] = 1
+                candlestick_df.loc[candlestick_df['SMA_Short'] < candlestick_df['SMA_Long'], 'Signal'] = -1
+
+                # Identify crossover points
+                candlestick_df['Position'] = candlestick_df['Signal'].diff()
+
+                # Trading Simulation
+                current_inr_balance = 100000.0
+                current_usd_held = 0.0
+                simulation_trade_history = []
+                trade_amount_inr = 10000.0
+
+                buy_markers_x = []
+                buy_markers_y = []
+                sell_markers_x = []
+                sell_markers_y = []
+
+                # Simulate trades
+                for i, row in candlestick_df.iterrows():
+                    if row['Position'] == 1:  # Buy signal
+                        if current_inr_balance >= trade_amount_inr:
+                            usd_bought = trade_amount_inr / row['Close']
+                            current_inr_balance -= trade_amount_inr
+                            current_usd_held += usd_bought
+                            simulation_trade_history.append({
+                                'Time': i.strftime('%Y-%m-%d %H:%M:%S'),
+                                'Type': 'BUY',
+                                'Amount (INR)': trade_amount_inr,
+                                'USD Bought': f"{usd_bought:.2f}",
+                                'Price': f"₹{row['Close']:.2f}",
+                                'INR Balance': f"₹{current_inr_balance:,.2f}",
+                                'USD Held': f"${current_usd_held:,.2f}"
+                            })
+                            buy_markers_x.append(i)
+                            buy_markers_y.append(row['Close'])
+                    elif row['Position'] == -1:  # Sell signal
+                        if current_usd_held > 0:
+                            inr_sold = current_usd_held * row['Close']
+                            current_inr_balance += inr_sold
+                            usd_sold = current_usd_held
+                            current_usd_held = 0.0
+                            simulation_trade_history.append({
+                                'Time': i.strftime('%Y-%m-%d %H:%M:%S'),
+                                'Type': 'SELL',
+                                'Amount (INR)': f"{inr_sold:,.2f}",
+                                'USD Sold': f"{usd_sold:.2f}",
+                                'Price': f"₹{row['Close']:.2f}",
+                                'INR Balance': f"₹{current_inr_balance:,.2f}",
+                                'USD Held': f"${current_usd_held:,.2f}"
+                            })
+                            sell_markers_x.append(i)
+                            sell_markers_y.append(row['Close'])
+
+                # Store simulation results
+                st.session_state.inr_balance_sim = current_inr_balance
+                st.session_state.usd_held_sim = current_usd_held
+                st.session_state.trade_history_sim = simulation_trade_history
+
+                # Create the plot
+                fig = go.Figure()
+
+                # Add candlestick chart
+                fig.add_trace(go.Candlestick(
+                    x=candlestick_df.index,
+                    open=candlestick_df['Open'],
+                    high=candlestick_df['High'],
+                    low=candlestick_df['Low'],
+                    close=candlestick_df['Close'],
+                    name='USD/INR',
+                    increasing_line_color='green',
+                    decreasing_line_color='red'
+                ))
+
+                # Add SMAs
+                fig.add_trace(go.Scatter(
+                    x=candlestick_df.index,
+                    y=candlestick_df['SMA_Short'],
+                    mode='lines',
+                    name=f'SMA {short_sma}',
+                    line=dict(color='blue', width=2)
+                ))
+
+                fig.add_trace(go.Scatter(
+                    x=candlestick_df.index,
+                    y=candlestick_df['SMA_Long'],
+                    mode='lines',
+                    name=f'SMA {long_sma}',
+                    line=dict(color='orange', width=2)
+                ))
+
+                # Add buy/sell signals
+                if buy_markers_x:
+                    fig.add_trace(go.Scatter(
+                        x=buy_markers_x,
+                        y=buy_markers_y,
+                        mode='markers',
+                        marker=dict(symbol='triangle-up', size=12, color='green'),
+                        name='Buy Signal'
+                    ))
+
+                if sell_markers_x:
+                    fig.add_trace(go.Scatter(
+                        x=sell_markers_x,
+                        y=sell_markers_y,
+                        mode='markers',
+                        marker=dict(symbol='triangle-down', size=12, color='red'),
+                        name='Sell Signal'
+                    ))
+
+                # Update layout
+                fig.update_layout(
+                    title=f'USD/INR Live Chart - {selected_timeframe_label} ({data_source})',
+                    xaxis_title='Time',
+                    yaxis_title='Price (INR)',
+                    xaxis_rangeslider_visible=False,
+                    hovermode="x unified",
+                    height=500,
+                    showlegend=True,
+                    legend=dict(
+                        yanchor="top",
+                        y=0.99,
+                        xanchor="left",
+                        x=0.01
+                    )
+                )
+
+                # Auto-scale Y-axis to current price range
+                if not candlestick_df.empty:
+                    recent_data = candlestick_df.tail(50)  # Last 50 data points
+                    y_min = recent_data[['Low', 'SMA_Short', 'SMA_Long']].min().min()
+                    y_max = recent_data[['High', 'SMA_Short', 'SMA_Long']].max().max()
+                    y_range = y_max - y_min
+                    fig.update_yaxes(range=[y_min - 0.1 * y_range, y_max + 0.1 * y_range])
+
+                return fig, candlestick_df
+
+            else:
+                st.warning("No data available for the selected timeframe.")
+                return None, pd.DataFrame()
+
+        except Exception as e:
+            st.error(f"Error creating chart: {str(e)}")
+            return None, pd.DataFrame()
+
+    # Display the chart
+    try:
+        fig, chart_data = get_and_plot_live_candlesticks_with_signals(
+            timeframe=selected_timeframe,
+            data_source=data_source_key,
+            short_sma=short_sma_period,
+            long_sma=long_sma_period
+        )
+        
+        if fig is not None:
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Display data info
+            if not chart_data.empty:
+                st.info(f"📊 Showing {len(chart_data)} data points | Latest: {chart_data.index[-1].strftime('%Y-%m-%d %H:%M:%S')} | Price: ₹{chart_data['Close'].iloc[-1]:.2f}")
+        
+        # Auto-refresh functionality
+        if auto_refresh:
+            time.sleep(refresh_interval)
+            st.rerun()
+            
+    except Exception as e:
+        st.error(f"Failed to load chart: {str(e)}")
+        st.info("Please check your Alpha Vantage API key and internet connection.")
 
 st.markdown("---")
 
+# --- Display Simulation Results ---
+col1, col2 = st.columns([1, 1])
+
+with col1:
+    st.subheader("📈 Trading Simulation Results")
+    if 'inr_balance_sim' in st.session_state:
+        sim_col1, sim_col2, sim_col3 = st.columns(3)
+        with sim_col1:
+            st.metric("Final INR Balance", f"₹{st.session_state.inr_balance_sim:,.2f}")
+        with sim_col2:
+            st.metric("Final USD Held", f"${st.session_state.usd_held_sim:,.2f}")
+        with sim_col3:
+            total_value = st.session_state.inr_balance_sim + (st.session_state.usd_held_sim * live_rate)
+            profit_loss = total_value - 100000.0
+            st.metric("Total Portfolio Value", f"₹{total_value:,.2f}", delta=f"₹{profit_loss:,.2f}")
+
+with col2:
+    st.subheader("📋 Recent Trade History")
+    if 'trade_history_sim' in st.session_state and st.session_state.trade_history_sim:
+        trade_df = pd.DataFrame(st.session_state.trade_history_sim)
+        st.dataframe(trade_df.tail(10), use_container_width=True)
+    else:
+        st.info("No trades executed yet in the current simulation.")
+
+st.markdown("---")
 
 # --- Chat Section ---
-st.header("💬 Chat with the Bot")
+st.header("💬 AI Trading Assistant")
 
 # Display chat history
 for message in st.session_state.chat_history:
@@ -365,10 +460,10 @@ for message in st.session_state.chat_history:
 
 # --- Input Form for Chat ---
 with st.form(key='chat_form', clear_on_submit=True):
-    user_input = st.text_input("🧠 Ask a question:", key="user_question_input")
+    user_input = st.text_input("🧠 Ask about USD/INR rates, trading signals, or forex trends:", key="user_question_input")
     submit_button = st.form_submit_button(label='Send')
 
-    if submit_button and user_input: # Process only when button is clicked and input is not empty
+    if submit_button and user_input:
         if user_input.lower() == 'exit':
             st.session_state.chat_history.append({"role": "user", "content": user_input})
             st.session_state.chat_history.append({"role": "bot", "content": "Goodbye! The bot session has ended."})
@@ -379,13 +474,25 @@ with st.form(key='chat_form', clear_on_submit=True):
                 # Check if the user's question explicitly asks for the rate
                 if "usd" in user_input.lower() and "inr" in user_input.lower() and ("price" in user_input.lower() or "rate" in user_input.lower()):
                     try:
-                        rate = get_usd_inr_rate()
-                        llm_response = f"The current USD to INR exchange rate is ₹{rate:.2f}."
+                        rate = get_current_rate_with_fallback()
+                        llm_response = f"The current USD to INR exchange rate is ₹{rate:.2f}. This rate is fetched live from our data sources."
                     except Exception:
-                        llm_response = "I couldn't fetch the live USD to INR rate at the moment, but I can still discuss forex trends."
+                        llm_response = "I couldn't fetch the live USD to INR rate at the moment, but I can still discuss forex trends and trading strategies."
                 else:
                     # Use the conversational chain for other questions
                     llm_response = st.session_state.conversation.predict(input=user_input)
 
                 st.session_state.chat_history.append({"role": "bot", "content": llm_response})
+
+# --- Footer ---
+st.markdown("---")
+st.markdown(
+    """
+    <div style='text-align: center; color: gray; font-size: small;'>
+    💹 USD/INR Trading Bot | Powered by Alpha Vantage API & Streamlit | 
+    Set ALPHA_VANTAGE_API_KEY environment variable for intraday data
+    </div>
+    """,
+    unsafe_allow_html=True
+)
 
