@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database (Data Tier)
+  db:
+    image: postgres:15
+    container_name: trading_bot_db
+    environment:
+      POSTGRES_DB: trading_bot_db
+      POSTGRES_USER: trading_user
+      POSTGRES_PASSWORD: trading_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trading_user -d trading_bot_db"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # FastAPI Backend (Business Logic Tier)
+  backend:
+    build: ./backend
+    container_name: trading_bot_backend
+    environment:
+      - DATABASE_URL=postgresql://trading_user:trading_password@db:5432/trading_bot_db
+      - ALPHA_VANTAGE_API_KEY=${ALPHA_VANTAGE_API_KEY}
+      - HF_TOKEN=${HF_TOKEN}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    command: uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+
+  # React Frontend (Presentation Tier)
+  frontend:
+    build: ./frontend
+    container_name: trading_bot_frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+    command: npm run dev
+
+volumes:
+  postgres_data:
